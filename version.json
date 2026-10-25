@@ -1,4 +1,4 @@
 {
-  "version": "1.1.0",
-  "changelog": "- Sistema de atualização integrado (botão nas Configurações e no menu da bandeja)\n- Checagem automática silenciosa ao iniciar\n- Modos de ditado: E-mail profissional (Alt+E) e Tradução para inglês (Alt+T)\n- Modo mãos-livres (toggle), overlay 'Escutando...', listas automáticas"
+  "version": "1.2.0",
+  "changelog": "- Texto mais bem estruturado: a IA agora separa o ditado em parágrafos curtos (um por ideia), quebra frases longas e dá respiro visual ao texto\n- Ditados curtos continuam simples, sem estrutura forçada\n- Vale para os níveis normal e formal da correção"
 }

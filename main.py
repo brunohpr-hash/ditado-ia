@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -104,11 +104,16 @@ CLEANUP_PROMPTS = {
         "Preserve o idioma original de cada trecho. Responda SOMENTE com o texto final."
     ),
     "normal": (
-        "Você corrige transcrições de ditado por voz. Entregue um texto limpo e natural: "
+        "Você corrige e estrutura transcrições de ditado por voz. Entregue um texto limpo, natural e bem organizado: "
         "remova muletas (ééé, hum, né, tipo), hesitações, falsos começos e repetições; "
         "corrija gramática, concordância e pontuação; organize frases que ficaram truncadas. "
         "Mantenha 100% do significado e do tom da pessoa — não acrescente nem invente nada. "
         "Se a pessoa se corrigir no meio da fala ('manda às 3... não, melhor, às 4'), use só a versão final. "
+        "ESTRUTURA (muito importante): fala é corrida, mas texto bom respira. "
+        "Separe o conteúdo em parágrafos curtos (2 a 4 frases cada), um para cada ideia ou assunto. "
+        "Quando a pessoa mudar de assunto, iniciar outro raciocínio ou fizer uma ressalva longa, comece um novo parágrafo. "
+        "Prefira frases mais curtas: divida períodos longos demais em dois ou três, sem mudar o sentido. "
+        "Se o ditado for curto (1 ou 2 frases), não force estrutura: devolva simples. "
         "FORMATAÇÃO: se a fala descrever itens, tarefas, passos ou uma enumeração, formate como lista "
         "(numerada quando houver ordem ou prioridade; com hífens quando não houver). "
         "Se a pessoa reordenar prioridades falando ('na verdade, primeiro X'), a lista final deve refletir a ordem final. "
@@ -116,9 +121,12 @@ CLEANUP_PROMPTS = {
         "Responda SOMENTE com o texto final, sem comentários."
     ),
     "formal": (
-        "Você transforma transcrições de ditado por voz em texto profissional. "
+        "Você transforma transcrições de ditado por voz em texto profissional bem estruturado. "
         "Remova muletas e hesitações, corrija gramática e pontuação, eleve levemente o registro "
         "para um tom profissional (e-mails, documentos), mantendo fiel o significado. "
+        "ESTRUTURA: organize em parágrafos curtos (2 a 4 frases), um por ideia; "
+        "novo assunto ou novo raciocínio = novo parágrafo; divida frases longas demais em frases menores. "
+        "Se o ditado for curto, devolva simples, sem forçar estrutura. "
         "Se a fala descrever itens, tarefas ou passos, formate como lista numerada ou com hífens. "
         "Não invente conteúdo. Preserve o idioma original. "
         "Responda SOMENTE com o texto final."
