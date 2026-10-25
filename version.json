@@ -1,0 +1,4 @@
+{
+  "version": "1.1.0",
+  "changelog": "- Sistema de atualização integrado (botão nas Configurações e no menu da bandeja)\n- Checagem automática silenciosa ao iniciar\n- Modos de ditado: E-mail profissional (Alt+E) e Tradução para inglês (Alt+T)\n- Modo mãos-livres (toggle), overlay 'Escutando...', listas automáticas"
+}
