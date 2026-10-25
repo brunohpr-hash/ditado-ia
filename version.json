@@ -1,4 +1,4 @@
 {
-  "version": "1.2.0",
-  "changelog": "- Texto mais bem estruturado: a IA agora separa o ditado em parágrafos curtos (um por ideia), quebra frases longas e dá respiro visual ao texto\n- Ditados curtos continuam simples, sem estrutura forçada\n- Vale para os níveis normal e formal da correção"
+  "version": "1.2.1",
+  "changelog": "- Corrigido: janela de Configurações abria com os campos em branco (e podia salvar valores vazios por cima dos seus)\n- Corrigido: modo mãos-livres (toggle) não funcionava após o bug acima; configuração agora é preservada\n- Corrigido: reinício automático após atualizar — agora o app volta sozinho\n- Proteção extra: salvar com campos vazios nunca apaga chave/atalhos"
 }

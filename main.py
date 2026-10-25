@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -319,14 +319,24 @@ def download_update(app_dir):
 
 
 def restart_app():
-    """Reinicia o app com o código novo."""
+    """Reinicia o app com o código novo (processo independente, com folga de 2s)."""
     script = Path(__file__).resolve()
     exe = sys.executable
     # pythonw.exe do venv se existir (sem janela de console)
     pyw = Path(exe).with_name("pythonw.exe")
     if pyw.exists():
         exe = str(pyw)
-    subprocess.Popen([exe, str(script)], cwd=str(script.parent))
+    try:
+        if os.name == "nt":
+            # cmd independente espera 2s (app velho solta hooks/ícone) e relança
+            flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
+            cmd = f'ping -n 3 127.0.0.1 >nul & start "" "{exe}" "{script}"'
+            subprocess.Popen(["cmd", "/c", cmd], cwd=str(script.parent),
+                             creationflags=flags, close_fds=True)
+        else:
+            subprocess.Popen([exe, str(script)], cwd=str(script.parent))
+    except Exception as e:
+        log(f"restart falhou: {e}")
     os._exit(0)
 
 
@@ -642,7 +652,7 @@ class DitadoApp:
 
         # Atalho
         ttk.Label(frm, text="Atalho (segure para falar):").grid(row=0, column=0, sticky="w")
-        hot_var = tk.StringVar(value=self.cfg["hotkey"])
+        hot_var = tk.StringVar(master=win, value=self.cfg["hotkey"])
         hot_entry = ttk.Entry(frm, textvariable=hot_var, width=20)
         hot_entry.grid(row=0, column=1, sticky="w")
 
@@ -659,7 +669,7 @@ class DitadoApp:
 
         # Modo de ativação
         ttk.Label(frm, text="Modo de ativação:").grid(row=1, column=0, sticky="w")
-        mode_var = tk.StringVar(value=self.cfg.get("mode", "segurar"))
+        mode_var = tk.StringVar(master=win, value=self.cfg.get("mode", "segurar"))
         ttk.Combobox(frm, textvariable=mode_var, values=["segurar", "toggle"],
                      state="readonly", width=18).grid(row=1, column=1, sticky="w")
         ttk.Label(frm, text="toggle = mãos livres", foreground="#666").grid(
@@ -667,44 +677,44 @@ class DitadoApp:
 
         # Provedor
         ttk.Label(frm, text="Provedor de IA:").grid(row=2, column=0, sticky="w")
-        prov_var = tk.StringVar(value=self.cfg["provider"])
+        prov_var = tk.StringVar(master=win, value=self.cfg["provider"])
         ttk.Combobox(frm, textvariable=prov_var, values=["groq", "openai"],
                      state="readonly", width=18).grid(row=2, column=1, sticky="w")
 
         # API key
         ttk.Label(frm, text="Chave de API:").grid(row=3, column=0, sticky="w")
-        key_var = tk.StringVar(value=self.cfg["api_key"])
+        key_var = tk.StringVar(master=win, value=self.cfg["api_key"])
         ttk.Entry(frm, textvariable=key_var, width=38, show="*").grid(
             row=3, column=1, columnspan=2, sticky="w")
 
         # Correção IA
-        clean_var = tk.BooleanVar(value=self.cfg.get("cleanup", True))
+        clean_var = tk.BooleanVar(master=win, value=self.cfg.get("cleanup", True))
         ttk.Checkbutton(frm, text="Correção por IA (remove muletas, corrige gramática)",
                         variable=clean_var).grid(row=4, column=0, columnspan=3, sticky="w")
 
-        over_var = tk.BooleanVar(value=self.cfg.get("show_overlay", True))
+        over_var = tk.BooleanVar(master=win, value=self.cfg.get("show_overlay", True))
         ttk.Checkbutton(frm, text="Mostrar indicador 'Escutando...' na tela",
                         variable=over_var).grid(row=9, column=0, columnspan=3, sticky="w")
 
-        sup_var = tk.BooleanVar(value=self.cfg.get("suppress_keys", True))
+        sup_var = tk.BooleanVar(master=win, value=self.cfg.get("suppress_keys", True))
         ttk.Checkbutton(frm, text="Bloquear teclas do atalho (evita 'vvv' em alguns apps)",
                         variable=sup_var).grid(row=10, column=0, columnspan=3, sticky="w")
 
         ttk.Label(frm, text="Nível da correção:").grid(row=5, column=0, sticky="w")
-        lvl_var = tk.StringVar(value=self.cfg.get("cleanup_level", "normal"))
+        lvl_var = tk.StringVar(master=win, value=self.cfg.get("cleanup_level", "normal"))
         ttk.Combobox(frm, textvariable=lvl_var, values=["leve", "normal", "formal"],
                      state="readonly", width=18).grid(row=5, column=1, sticky="w")
 
         # Idioma
         ttk.Label(frm, text="Idioma (auto = detecta sozinho):").grid(row=6, column=0, sticky="w")
-        lang_var = tk.StringVar(value=self.cfg.get("language", "auto"))
+        lang_var = tk.StringVar(master=win, value=self.cfg.get("language", "auto"))
         ttk.Combobox(frm, textvariable=lang_var,
                      values=["auto", "pt", "en", "es"], state="readonly",
                      width=18).grid(row=6, column=1, sticky="w")
 
         # Modo de colagem
         ttk.Label(frm, text="Inserir texto via:").grid(row=7, column=0, sticky="w")
-        paste_var = tk.StringVar(value=self.cfg.get("paste_mode", "clipboard"))
+        paste_var = tk.StringVar(master=win, value=self.cfg.get("paste_mode", "clipboard"))
         ttk.Combobox(frm, textvariable=paste_var,
                      values=["clipboard", "type"], state="readonly",
                      width=18).grid(row=7, column=1, sticky="w")
@@ -721,15 +731,17 @@ class DitadoApp:
 
         def salvar():
             self.cfg["hotkey"] = hot_var.get().strip() or "alt+v"
-            self.cfg["mode"] = mode_var.get()
+            self.cfg["mode"] = mode_var.get() or self.cfg.get("mode", "segurar")
             self.cfg["show_overlay"] = over_var.get()
             self.cfg["suppress_keys"] = sup_var.get()
-            self.cfg["provider"] = prov_var.get()
-            self.cfg["api_key"] = key_var.get().strip()
+            self.cfg["provider"] = prov_var.get() or self.cfg.get("provider", "groq")
+            nova_chave = key_var.get().strip()
+            if nova_chave:  # nunca apaga a chave por campo vazio
+                self.cfg["api_key"] = nova_chave
             self.cfg["cleanup"] = clean_var.get()
-            self.cfg["cleanup_level"] = lvl_var.get()
-            self.cfg["language"] = lang_var.get()
-            self.cfg["paste_mode"] = paste_var.get()
+            self.cfg["cleanup_level"] = lvl_var.get() or self.cfg.get("cleanup_level", "normal")
+            self.cfg["language"] = lang_var.get() or "auto"
+            self.cfg["paste_mode"] = paste_var.get() or "clipboard"
             save_config(self.cfg)
             self.register_hotkey()
             win.destroy()
@@ -778,14 +790,14 @@ class DitadoApp:
         frm.pack(fill="both", expand=True, padx=10, pady=6)
 
         ttk.Label(frm, text="Nome:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        nome_var = tk.StringVar()
+        nome_var = tk.StringVar(master=win)
         ttk.Entry(frm, textvariable=nome_var, width=34).grid(row=0, column=1, sticky="w")
 
         ttk.Label(frm, text="Atalho:").grid(row=0, column=2, sticky="w", padx=6)
-        hot_var = tk.StringVar()
+        hot_var = tk.StringVar(master=win)
         ttk.Entry(frm, textvariable=hot_var, width=14).grid(row=0, column=3, sticky="w")
 
-        ativo_var = tk.BooleanVar(value=True)
+        ativo_var = tk.BooleanVar(master=win, value=True)
         ttk.Checkbutton(frm, text="Ativo", variable=ativo_var).grid(row=0, column=4, padx=6)
 
         ttk.Label(frm, text="Instrução (como a IA deve tratar a fala):").grid(
