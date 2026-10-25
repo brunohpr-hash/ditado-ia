@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "hotkey": "alt+v",
     "mode": "segurar",  # segurar (fala enquanto pressiona) | toggle (aperta 1x liga, 1x desliga)
     "show_overlay": True,  # indicador visual no centro inferior da tela
+    "live_preview": True,  # texto ao vivo na caixinha enquanto fala
     "suppress_keys": True,  # engole as teclas do atalho (evita digitar "vvvv" no app)
     "provider": "groq",  # groq | openai
     "api_key": "",
@@ -255,18 +256,38 @@ class Recorder:
         self.cfg = cfg
         self._frames = []
         self._stream = None
+        self.level = 0.0  # nível do microfone (0..1), para a animação
 
     def start(self):
         self._frames = []
+        self.level = 0.0
         sr = int(self.cfg.get("sample_rate", 16000))
 
         def cb(indata, n, t, status):
             self._frames.append(indata.copy())
+            try:
+                rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2))) / 32768.0
+                # suaviza: sobe rápido, desce devagar
+                alvo = min(1.0, rms * 14.0)
+                self.level = max(alvo, self.level * 0.85)
+            except Exception:
+                pass
 
         self._stream = sd.InputStream(samplerate=sr, channels=1, dtype="int16", callback=cb)
         self._stream.start()
 
+    def snapshot(self):
+        """Áudio acumulado até agora, sem parar a gravação (para prévia ao vivo)."""
+        frames = list(self._frames)
+        if not frames:
+            return None
+        try:
+            return np.concatenate(frames, axis=0).flatten()
+        except Exception:
+            return None
+
     def stop(self):
+        self.level = 0.0
         if self._stream:
             self._stream.stop()
             self._stream.close()
@@ -343,13 +364,21 @@ def restart_app():
 # ---------------------------------------------------------------- overlay
 
 class Overlay:
-    """Indicador visual flutuante no centro inferior da tela (estilo Speakly)."""
+    """Caixinha flutuante no centro inferior: texto ao vivo + ondas animadas."""
+
+    BG = "#1e1e28"
+    ACCENT = "#34d17b"  # verde das ondas
+    N_BARS = 24
 
     def __init__(self):
         self._root = None
         self._label = None
+        self._canvas = None
         self._queue = []
         self._lock = threading.Lock()
+        self._visible = False
+        self._level_fn = None   # callback que devolve o nível do mic (0..1)
+        self._phase = 0.0
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -359,17 +388,63 @@ class Overlay:
         self._root.overrideredirect(True)  # sem borda/título
         self._root.attributes("-topmost", True)
         try:
-            self._root.attributes("-alpha", 0.92)
+            self._root.attributes("-alpha", 0.94)
         except Exception:
             pass
-        bg = "#1e1e28"
-        self._root.configure(bg=bg)
+        self._root.configure(bg=self.BG)
+
         self._label = tk.Label(
-            self._root, text="", font=("Segoe UI", 11, "bold"),
-            fg="#ffffff", bg=bg, padx=18, pady=8,
+            self._root, text="", font=("Segoe UI", 11),
+            fg="#ffffff", bg=self.BG, padx=18, pady=(10),
+            wraplength=560, justify="left",
         )
-        self._label.pack()
+        self._label.pack(fill="x")
+
+        self._canvas = tk.Canvas(
+            self._root, width=600, height=34, bg=self.BG,
+            highlightthickness=0, bd=0,
+        )
+        self._canvas.pack(pady=(0, 8))
+
         self._root.withdraw()
+
+        def reposition():
+            self._root.update_idletasks()
+            w = max(self._root.winfo_reqwidth(), 620)
+            h = self._root.winfo_reqheight()
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            self._root.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - 70}")
+
+        def draw_waves():
+            self._canvas.delete("all")
+            if not self._visible:
+                return
+            import math
+            lvl = 0.0
+            if self._level_fn:
+                try:
+                    lvl = max(0.0, min(1.0, float(self._level_fn())))
+                except Exception:
+                    lvl = 0.0
+            self._phase += 0.35
+            cw = int(self._canvas.winfo_width()) or 600
+            ch = 34
+            mid = ch / 2
+            n = self.N_BARS
+            total_w = n * 14
+            x0 = (cw - total_w) / 2
+            for i in range(n):
+                # cada barra oscila com fase própria; altura = base + voz
+                osc = (math.sin(self._phase + i * 0.55) + 1) / 2  # 0..1
+                h_base = 3 + osc * 4
+                h_voice = lvl * 22 * (0.4 + 0.6 * osc)
+                bh = min(mid - 2, h_base + h_voice)
+                x = x0 + i * 14
+                self._canvas.create_rectangle(
+                    x, mid - bh, x + 7, mid + bh,
+                    fill=self.ACCENT, outline="",
+                )
 
         def poll():
             with self._lock:
@@ -378,25 +453,39 @@ class Overlay:
             for act, arg in actions:
                 if act == "show":
                     self._label.config(text=arg)
-                    self._root.update_idletasks()
-                    w = self._root.winfo_reqwidth()
-                    h = self._root.winfo_reqheight()
-                    sw = self._root.winfo_screenwidth()
-                    sh = self._root.winfo_screenheight()
-                    x = (sw - w) // 2
-                    y = sh - h - 70  # centro inferior, acima da barra de tarefas
-                    self._root.geometry(f"{w}x{h}+{x}+{y}")
-                    self._root.deiconify()
+                    if not self._visible:
+                        self._visible = True
+                        self._root.deiconify()
+                    reposition()
+                elif act == "text":
+                    self._label.config(text=arg)
+                    reposition()
+                elif act == "level_fn":
+                    self._level_fn = arg
                 elif act == "hide":
+                    self._visible = False
+                    self._level_fn = None
                     self._root.withdraw()
-            self._root.after(60, poll)
+            if self._visible:
+                draw_waves()
+            self._root.after(50, poll)
 
-        self._root.after(60, poll)
+        self._root.after(50, poll)
         self._root.mainloop()
 
     def show(self, text):
         with self._lock:
             self._queue.append(("show", text))
+
+    def set_text(self, text):
+        """Atualiza só o texto (prévia ao vivo), mantendo a caixinha aberta."""
+        with self._lock:
+            self._queue.append(("text", text))
+
+    def set_level_source(self, fn):
+        """Define a função que fornece o nível do microfone (0..1)."""
+        with self._lock:
+            self._queue.append(("level_fn", fn))
 
     def hide(self):
         with self._lock:
@@ -472,9 +561,42 @@ class DitadoApp:
         try:
             beep(880, 100)
             label = f"🎙️  {mode_name} — Escutando..." if mode_name else "🎙️  Escutando..."
-            self._overlay_show(label + ("  (solte para enviar)" if not toggle_mode
-                               else f"  ({mode_hotkey.upper()} para parar)"))
+            hint = ("  (solte para enviar)" if not toggle_mode
+                    else f"  ({mode_hotkey.upper()} para parar)")
+            self._overlay_show(label + hint)
             self.recorder.start()
+            if self.overlay and self.cfg.get("show_overlay", True):
+                self.overlay.set_level_source(lambda: self.recorder.level)
+
+            # ---- prévia ao vivo: transcreve o acumulado a cada ~2,5s
+            stop_preview = threading.Event()
+
+            def live_preview():
+                if not self.cfg.get("live_preview", True):
+                    return
+                pipe_prev = Pipeline(self.cfg)
+                last_len = 0
+                while not stop_preview.wait(2.5):
+                    snap = self.recorder.snapshot()
+                    if snap is None or len(snap) < self.cfg["sample_rate"]:
+                        continue
+                    if len(snap) == last_len:  # nada de áudio novo
+                        continue
+                    last_len = len(snap)
+                    try:
+                        parcial = pipe_prev.transcribe(
+                            wav_bytes(snap, self.cfg["sample_rate"]))
+                        if parcial and not stop_preview.is_set():
+                            # mostra só o final, para caber na caixinha
+                            if len(parcial) > 220:
+                                parcial = "…" + parcial[-220:]
+                            self.overlay.set_text(parcial)
+                    except Exception:
+                        pass  # prévia é melhor-esforço; o ditado final não depende dela
+
+            if self.overlay and self.cfg.get("show_overlay", True):
+                threading.Thread(target=live_preview, daemon=True).start()
+
             key = mode_hotkey.split("+")[-1].strip()
             t0 = time.time()
             if toggle_mode:
@@ -488,6 +610,7 @@ class DitadoApp:
                     if time.time() - t0 > self.cfg.get("max_seconds", 300):
                         break
                     time.sleep(0.03)
+            stop_preview.set()
             audio = self.recorder.stop()
             beep(660, 80)
             if audio is None or len(audio) < self.cfg["sample_rate"] // 4:
@@ -696,6 +819,10 @@ class DitadoApp:
         ttk.Checkbutton(frm, text="Mostrar indicador 'Escutando...' na tela",
                         variable=over_var).grid(row=9, column=0, columnspan=3, sticky="w")
 
+        prev_var = tk.BooleanVar(master=win, value=self.cfg.get("live_preview", True))
+        ttk.Checkbutton(frm, text="Prévia do texto ao vivo enquanto fala (na caixinha)",
+                        variable=prev_var).grid(row=11, column=0, columnspan=3, sticky="w")
+
         sup_var = tk.BooleanVar(master=win, value=self.cfg.get("suppress_keys", True))
         ttk.Checkbutton(frm, text="Bloquear teclas do atalho (evita 'vvv' em alguns apps)",
                         variable=sup_var).grid(row=10, column=0, columnspan=3, sticky="w")
@@ -733,6 +860,7 @@ class DitadoApp:
             self.cfg["hotkey"] = hot_var.get().strip() or "alt+v"
             self.cfg["mode"] = mode_var.get() or self.cfg.get("mode", "segurar")
             self.cfg["show_overlay"] = over_var.get()
+            self.cfg["live_preview"] = prev_var.get()
             self.cfg["suppress_keys"] = sup_var.get()
             self.cfg["provider"] = prov_var.get() or self.cfg.get("provider", "groq")
             nova_chave = key_var.get().strip()

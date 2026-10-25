@@ -1,4 +1,4 @@
 {
-  "version": "1.2.1",
-  "changelog": "- Corrigido: janela de Configurações abria com os campos em branco (e podia salvar valores vazios por cima dos seus)\n- Corrigido: modo mãos-livres (toggle) não funcionava após o bug acima; configuração agora é preservada\n- Corrigido: reinício automático após atualizar — agora o app volta sozinho\n- Proteção extra: salvar com campos vazios nunca apaga chave/atalhos"
+  "version": "1.3.0",
+  "changelog": "- Nova caixinha de ditado: mostra o texto sendo transcrito AO VIVO enquanto você fala\n- Animação de ondas verdes que pulsam conforme sua voz\n- Opção nas Configurações para ligar/desligar a prévia ao vivo\n- A prévia é melhor-esforço: se a internet oscilar, o ditado final não é afetado"
 }
