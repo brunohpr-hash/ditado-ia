@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -340,7 +340,7 @@ def download_update(app_dir):
 
 
 def restart_app():
-    """Reinicia o app com o código novo (processo independente, com folga de 2s)."""
+    """Reinicia o app com o código novo (bootstrap pythonw, sem console)."""
     script = Path(__file__).resolve()
     exe = sys.executable
     # pythonw.exe do venv se existir (sem janela de console)
@@ -349,11 +349,14 @@ def restart_app():
         exe = str(pyw)
     try:
         if os.name == "nt":
-            # cmd independente espera 2s (app velho solta hooks/ícone) e relança
+            # bootstrap em python puro: espera 2s (app velho solta hooks/ícone)
+            # e relança — sem cmd/ping, que falhavam sem console
+            boot = ("import time,subprocess; time.sleep(2); "
+                    f"subprocess.Popen([{exe!r}, {str(script)!r}], "
+                    f"cwd={str(script.parent)!r})")
             flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-            cmd = f'ping -n 3 127.0.0.1 >nul & start "" "{exe}" "{script}"'
-            subprocess.Popen(["cmd", "/c", cmd], cwd=str(script.parent),
-                             creationflags=flags, close_fds=True)
+            subprocess.Popen([exe, "-c", boot], creationflags=flags, close_fds=True)
+            log("restart: bootstrap lançado")
         else:
             subprocess.Popen([exe, str(script)], cwd=str(script.parent))
     except Exception as e:
