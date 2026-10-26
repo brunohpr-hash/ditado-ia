@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -716,14 +716,15 @@ class DitadoApp:
             except Exception as e:
                 log(f"falha registrando modo '{m.get('nome')}' ({m.get('hotkey')}): {e}")
 
-    # ---------- vigia (watchdog): religa atalhos após bloqueio/suspensão
+    # ---------- vigia (watchdog): recupera o app após bloqueio/suspensão
     def _watchdog(self):
-        """O Windows desliga os hooks de teclado quando a sessão é bloqueada
-        (tela de senha) ou o PC dorme. Este vigia detecta a volta e religa."""
+        """O Windows invalida os hooks de teclado quando a sessão é bloqueada
+        (tela de senha) ou o PC dorme — e religar os atalhos não basta: a
+        escuta interna da biblioteca fica quebrada. O vigia detecta a volta
+        e REINICIA o app inteiro (rápido e silencioso), que renasce saudável."""
         import ctypes
-        intervalo = 30  # segundos entre checagens
+        intervalo = 15  # segundos entre checagens
         ultimo = time.monotonic()
-        ultima_religada = 0.0
 
         def sessao_bloqueada():
             try:
@@ -744,23 +745,23 @@ class DitadoApp:
             ultimo = agora
 
             bloqueada = sessao_bloqueada() if os.name == "nt" else False
+            if bloqueada and not estava_bloqueada:
+                log("watchdog: sessão bloqueada detectada")
             voltou_do_bloqueio = estava_bloqueada and not bloqueada
             estava_bloqueada = bloqueada
 
-            precisa_religar = saltou or voltou_do_bloqueio
-            # religada periódica de segurança a cada 10 min, fora de gravação
-            if not precisa_religar and (agora - ultima_religada) > 600:
-                precisa_religar = True
-
-            if precisa_religar and not self.busy and not bloqueada:
+            if (saltou or voltou_do_bloqueio) and not bloqueada:
+                if self.busy:
+                    log("watchdog: recuperação adiada (ditado em andamento)")
+                    continue
+                motivo = "suspensão" if saltou else "bloqueio de sessão"
+                log(f"watchdog: reiniciando o app após {motivo}")
                 try:
-                    self.register_hotkey()
-                    ultima_religada = agora
-                    if saltou or voltou_do_bloqueio:
-                        motivo = "suspensão" if saltou else "bloqueio de sessão"
-                        log(f"watchdog: atalhos religados após {motivo}")
-                except Exception as e:
-                    log(f"watchdog: falha religando atalhos: {e}")
+                    if self.icon:
+                        self.icon.stop()
+                except Exception:
+                    pass
+                restart_app()
 
     # ---------- atualização
     def do_update_check(self, silent=False):
