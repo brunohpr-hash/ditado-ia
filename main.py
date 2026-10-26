@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -716,6 +716,52 @@ class DitadoApp:
             except Exception as e:
                 log(f"falha registrando modo '{m.get('nome')}' ({m.get('hotkey')}): {e}")
 
+    # ---------- vigia (watchdog): religa atalhos após bloqueio/suspensão
+    def _watchdog(self):
+        """O Windows desliga os hooks de teclado quando a sessão é bloqueada
+        (tela de senha) ou o PC dorme. Este vigia detecta a volta e religa."""
+        import ctypes
+        intervalo = 30  # segundos entre checagens
+        ultimo = time.monotonic()
+        ultima_religada = 0.0
+
+        def sessao_bloqueada():
+            try:
+                # OpenInputDesktop falha quando a área de trabalho segura (senha) está ativa
+                h = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
+                if h:
+                    ctypes.windll.user32.CloseDesktop(h)
+                    return False
+                return True
+            except Exception:
+                return False
+
+        estava_bloqueada = False
+        while True:
+            time.sleep(intervalo)
+            agora = time.monotonic()
+            saltou = (agora - ultimo) > (intervalo + 20)  # dormiu/suspendeu
+            ultimo = agora
+
+            bloqueada = sessao_bloqueada() if os.name == "nt" else False
+            voltou_do_bloqueio = estava_bloqueada and not bloqueada
+            estava_bloqueada = bloqueada
+
+            precisa_religar = saltou or voltou_do_bloqueio
+            # religada periódica de segurança a cada 10 min, fora de gravação
+            if not precisa_religar and (agora - ultima_religada) > 600:
+                precisa_religar = True
+
+            if precisa_religar and not self.busy and not bloqueada:
+                try:
+                    self.register_hotkey()
+                    ultima_religada = agora
+                    if saltou or voltou_do_bloqueio:
+                        motivo = "suspensão" if saltou else "bloqueio de sessão"
+                        log(f"watchdog: atalhos religados após {motivo}")
+                except Exception as e:
+                    log(f"watchdog: falha religando atalhos: {e}")
+
     # ---------- atualização
     def do_update_check(self, silent=False):
         """Verifica a nuvem; se houver versão nova, pergunta e aplica."""
@@ -1050,6 +1096,9 @@ class DitadoApp:
 
         # checagem silenciosa de atualização ao iniciar (só avisa se houver nova)
         threading.Timer(8.0, lambda: self.do_update_check(silent=True)).start()
+
+        # vigia: religa os atalhos quando o PC volta de bloqueio/suspensão
+        threading.Thread(target=self._watchdog, daemon=True).start()
 
         menu = pystray.Menu(
             pystray.MenuItem(f"Atalho: segure {self.cfg['hotkey'].upper()} e fale",
