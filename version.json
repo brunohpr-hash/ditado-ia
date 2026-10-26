@@ -1,4 +1,4 @@
 {
-  "version": "1.4.1",
-  "changelog": "- Correção definitiva do bug do bloqueio de tela: religar os atalhos não bastava (a escuta de teclado fica quebrada por dentro). Agora, ao detectar a volta do bloqueio ou da suspensão, o app se reinicia sozinho em ~2 segundos — mesmo mecanismo do reinício pós-atualização, já validado\n- Vigia mais rápido: verifica a cada 15 segundos\n- Registro detalhado no app.log (bloqueio detectado, motivo do reinício) para diagnóstico"
+  "version": "1.4.2",
+  "changelog": "- Corrigido: quando o ditado era uma pergunta ou comando ('quero que você liste...'), a IA às vezes RESPONDIA a pergunta em vez de apenas corrigir o texto, inventando conteúdo que você não falou\n- Agora a transcrição vai blindada para a IA: ela é tratada sempre como texto a revisar, nunca como pedido a executar — perguntas voltam como perguntas, corrigidas"
 }
