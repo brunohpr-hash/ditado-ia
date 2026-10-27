@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "mode": "segurar",  # segurar (fala enquanto pressiona) | toggle (aperta 1x liga, 1x desliga)
     "show_overlay": True,  # indicador visual no centro inferior da tela
     "live_preview": True,  # texto ao vivo na caixinha enquanto fala
+    "economy_threshold": 80,  # % da cota diária que desliga a prévia ao vivo
     "suppress_keys": True,  # engole as teclas do atalho (evita digitar "vvvv" no app)
     "provider": "groq",  # groq | openai
     "api_key": "",
@@ -201,6 +202,25 @@ def beep(freq=880, dur=120):
 
 # ---------------------------------------------------------------- pipeline
 
+# Uso da cota (lido dos cabeçalhos de resposta da Groq, sem custo extra).
+# Considera apenas o limite DIÁRIO de requisições — os limites por minuto
+# oscilam demais e dariam alarme falso.
+USAGE = {"pct": 0.0}
+
+
+def update_usage(headers):
+    """Atualiza o % usado da cota diária a partir dos cabeçalhos da API."""
+    try:
+        limit = headers.get("x-ratelimit-limit-requests")
+        remaining = headers.get("x-ratelimit-remaining-requests")
+        if limit and remaining:
+            limit = float(limit)
+            if limit > 0:
+                USAGE["pct"] = max(0.0, min(100.0, 100.0 * (1 - float(remaining) / limit)))
+    except Exception:
+        pass
+
+
 class Pipeline:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -220,6 +240,7 @@ class Pipeline:
             data=data,
             timeout=120,
         )
+        update_usage(r.headers)
         r.raise_for_status()
         return (r.json().get("text") or "").strip()
 
@@ -259,6 +280,7 @@ class Pipeline:
             },
             timeout=60,
         )
+        update_usage(r.headers)
         r.raise_for_status()
         out = r.json()["choices"][0]["message"]["content"].strip()
         # remove tags caso o modelo as devolva
@@ -521,6 +543,7 @@ class DitadoApp:
         self.recorder = Recorder(self.cfg)
         self.busy = False
         self.recording_toggle = False  # estado do modo toggle (mãos livres)
+        self._economy_notified = False  # aviso de modo economia (1x por sessão)
         self.icon = None
         self.overlay = None
         self._hotkey_handle = None
@@ -594,6 +617,16 @@ class DitadoApp:
 
             def live_preview():
                 if not self.cfg.get("live_preview", True):
+                    return
+                limiar = float(self.cfg.get("economy_threshold", 80))
+                if USAGE["pct"] >= limiar:
+                    if not self._economy_notified:
+                        self._economy_notified = True
+                        log(f"modo economia: previa ao vivo desligada ({USAGE['pct']:.0f}% da cota diaria)")
+                        self.notify(
+                            f"Modo economia: você usou {USAGE['pct']:.0f}% da cota diária. "
+                            "A prévia ao vivo foi pausada para preservar o ditado — "
+                            "tudo volta ao normal à meia-noite (EUA).")
                     return
                 pipe_prev = Pipeline(self.cfg)
                 last_len = 0

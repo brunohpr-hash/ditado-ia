@@ -1,4 +1,4 @@
 {
-  "version": "1.4.2",
-  "changelog": "- Corrigido: quando o ditado era uma pergunta ou comando ('quero que você liste...'), a IA às vezes RESPONDIA a pergunta em vez de apenas corrigir o texto, inventando conteúdo que você não falou\n- Agora a transcrição vai blindada para a IA: ela é tratada sempre como texto a revisar, nunca como pedido a executar — perguntas voltam como perguntas, corrigidas"
+  "version": "1.5.0",
+  "changelog": "- Modo economia automático: ao atingir 80% da cota diária gratuita da Groq, a prévia ao vivo é pausada sozinha (com notificação) para preservar o essencial — o ditado e a correção por IA\n- O consumo é lido dos cabeçalhos das respostas da API, sem nenhuma requisição extra\n- Limiar configurável no config.json (economy_threshold); prévia volta automaticamente quando a cota renova (meia-noite, horário dos EUA)"
 }
