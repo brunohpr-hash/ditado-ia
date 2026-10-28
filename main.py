@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -544,6 +544,7 @@ class DitadoApp:
         self.busy = False
         self.recording_toggle = False  # estado do modo toggle (mãos livres)
         self._economy_notified = False  # aviso de modo economia (1x por sessão)
+        self._recovering = False  # evita recuperações simultâneas
         self.icon = None
         self.overlay = None
         self._hotkey_handle = None
@@ -767,52 +768,133 @@ class DitadoApp:
             except Exception as e:
                 log(f"falha registrando modo '{m.get('nome')}' ({m.get('hotkey')}): {e}")
 
-    # ---------- vigia (watchdog): recupera o app após bloqueio/suspensão
-    def _watchdog(self):
-        """O Windows invalida os hooks de teclado quando a sessão é bloqueada
-        (tela de senha) ou o PC dorme — e religar os atalhos não basta: a
-        escuta interna da biblioteca fica quebrada. O vigia detecta a volta
-        e REINICIA o app inteiro (rápido e silencioso), que renasce saudável."""
-        import ctypes
-        intervalo = 15  # segundos entre checagens
-        ultimo = time.monotonic()
-
-        def sessao_bloqueada():
+    # ---------- recuperação após bloqueio/suspensão
+    def _recover(self, motivo):
+        """Reinicia o app (os hooks de teclado morrem no bloqueio/suspensão
+        e religar não basta). Chamado pelos eventos oficiais do Windows."""
+        if self._recovering:
+            return
+        self._recovering = True
+        try:
+            time.sleep(3)  # deixa a área de trabalho assentar
+            espera = 0
+            while self.busy and espera < 120:
+                time.sleep(1)
+                espera += 1
+            log(f"recuperacao: reiniciando o app apos {motivo}")
             try:
-                # OpenInputDesktop falha quando a área de trabalho segura (senha) está ativa
-                h = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
-                if h:
-                    ctypes.windll.user32.CloseDesktop(h)
-                    return False
-                return True
+                if self.icon:
+                    self.icon.stop()
             except Exception:
-                return False
+                pass
+            restart_app()
+        except Exception as e:
+            log(f"recuperacao falhou ({motivo}): {e}")
+            self._recovering = False
 
-        estava_bloqueada = False
+    def _session_listener(self):
+        """Canal OFICIAL do Windows: recebe o aviso de sessão desbloqueada
+        (WTSRegisterSessionNotification) e de retomada pós-suspensão.
+        Método usado por apps profissionais — não depende de adivinhação."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            wtsapi = ctypes.windll.wtsapi32
+
+            WM_WTSSESSION_CHANGE = 0x02B1
+            WTS_SESSION_UNLOCK = 0x8
+            WM_POWERBROADCAST = 0x218
+            PBT_APMRESUMESUSPEND = 0x7
+            PBT_APMRESUMEAUTOMATIC = 0x12
+            NOTIFY_FOR_THIS_SESSION = 0
+
+            WNDPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_longlong, wintypes.HWND, ctypes.c_uint,
+                wintypes.WPARAM, wintypes.LPARAM)
+
+            def wnd_proc(hwnd, msg, wparam, lparam):
+                try:
+                    if msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_UNLOCK:
+                        log("evento do Windows: sessao desbloqueada")
+                        threading.Thread(target=self._recover,
+                                         args=("desbloqueio de sessao",),
+                                         daemon=True).start()
+                    elif msg == WM_POWERBROADCAST and wparam in (
+                            PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC):
+                        log("evento do Windows: retomada da suspensao")
+                        threading.Thread(target=self._recover,
+                                         args=("retomada da suspensao",),
+                                         daemon=True).start()
+                except Exception as e:
+                    log(f"session_listener wnd_proc: {e}")
+                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+            proc = WNDPROC(wnd_proc)
+            self._session_wndproc = proc  # impede o coletor de lixo de destruir
+
+            class WNDCLASS(ctypes.Structure):
+                _fields_ = [
+                    ("style", ctypes.c_uint),
+                    ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE),
+                    ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HANDLE),
+                    ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR),
+                ]
+
+            hinst = kernel32.GetModuleHandleW(None)
+            wc = WNDCLASS()
+            wc.style = 0
+            wc.lpfnWndProc = proc
+            wc.hInstance = hinst
+            wc.lpszClassName = "DitadoIASessionWatcher"
+            if not user32.RegisterClassW(ctypes.byref(wc)):
+                log(f"session_listener: RegisterClass falhou ({ctypes.GetLastError()})")
+                return
+
+            hwnd = user32.CreateWindowExW(
+                0, wc.lpszClassName, "DitadoIA Watcher", 0,
+                0, 0, 0, 0, None, None, hinst, None)
+            if not hwnd:
+                log(f"session_listener: CreateWindow falhou ({ctypes.GetLastError()})")
+                return
+
+            if not wtsapi.WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION):
+                log(f"session_listener: WTSRegister falhou ({ctypes.GetLastError()})")
+            else:
+                log("session_listener: registrado para eventos de sessao do Windows")
+
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        except Exception as e:
+            log(f"session_listener: erro fatal: {e}")
+
+    def _watchdog(self):
+        """Reserva: detecta suspensao por salto do relogio (caso o evento
+        oficial falhe em alguma maquina)."""
+        intervalo = 15
+        ultimo = time.monotonic()
         while True:
             time.sleep(intervalo)
             agora = time.monotonic()
-            saltou = (agora - ultimo) > (intervalo + 20)  # dormiu/suspendeu
+            saltou = (agora - ultimo) > (intervalo + 25)
             ultimo = agora
-
-            bloqueada = sessao_bloqueada() if os.name == "nt" else False
-            if bloqueada and not estava_bloqueada:
-                log("watchdog: sessão bloqueada detectada")
-            voltou_do_bloqueio = estava_bloqueada and not bloqueada
-            estava_bloqueada = bloqueada
-
-            if (saltou or voltou_do_bloqueio) and not bloqueada:
-                if self.busy:
-                    log("watchdog: recuperação adiada (ditado em andamento)")
-                    continue
-                motivo = "suspensão" if saltou else "bloqueio de sessão"
-                log(f"watchdog: reiniciando o app após {motivo}")
-                try:
-                    if self.icon:
-                        self.icon.stop()
-                except Exception:
-                    pass
-                restart_app()
+            if saltou and not self._recovering:
+                log("watchdog reserva: salto de relogio detectado (suspensao)")
+                threading.Thread(target=self._recover,
+                                 args=("suspensao (reserva)",),
+                                 daemon=True).start()
 
     # ---------- atualização
     def do_update_check(self, silent=False):
@@ -1149,7 +1231,8 @@ class DitadoApp:
         # checagem silenciosa de atualização ao iniciar (só avisa se houver nova)
         threading.Timer(8.0, lambda: self.do_update_check(silent=True)).start()
 
-        # vigia: religa os atalhos quando o PC volta de bloqueio/suspensão
+        # recuperação pós bloqueio/suspensão: canal oficial + reserva
+        threading.Thread(target=self._session_listener, daemon=True).start()
         threading.Thread(target=self._watchdog, daemon=True).start()
 
         menu = pystray.Menu(
