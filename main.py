@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -379,19 +379,18 @@ def download_update(app_dir):
     return updated
 
 
-def restart_app():
-    """Reinicia o app com o código novo (bootstrap pythonw, sem console)."""
+def restart_app(icon=None):
+    """Relança o app de forma deterministica: PRIMEIRO garante o bootstrap
+    no ar, DEPOIS derruba o icone/processo. (Corrige corrida em que o
+    processo morria antes de lancar o relancador.)"""
     script = Path(__file__).resolve()
     exe = sys.executable
-    # pythonw.exe do venv se existir (sem janela de console)
     pyw = Path(exe).with_name("pythonw.exe")
     if pyw.exists():
         exe = str(pyw)
     try:
         if os.name == "nt":
-            # bootstrap em python puro: espera 2s (app velho solta hooks/ícone)
-            # e relança — sem cmd/ping, que falhavam sem console
-            boot = ("import time,subprocess; time.sleep(2); "
+            boot = ("import time,subprocess; time.sleep(3); "
                     f"subprocess.Popen([{exe!r}, {str(script)!r}], "
                     f"cwd={str(script.parent)!r})")
             flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
@@ -401,6 +400,11 @@ def restart_app():
             subprocess.Popen([exe, str(script)], cwd=str(script.parent))
     except Exception as e:
         log(f"restart falhou: {e}")
+    try:
+        if icon is not None:
+            icon.stop()
+    except Exception:
+        pass
     os._exit(0)
 
 
@@ -782,12 +786,7 @@ class DitadoApp:
                 time.sleep(1)
                 espera += 1
             log(f"recuperacao: reiniciando o app apos {motivo}")
-            try:
-                if self.icon:
-                    self.icon.stop()
-            except Exception:
-                pass
-            restart_app()
+            restart_app(self.icon)
         except Exception as e:
             log(f"recuperacao falhou ({motivo}): {e}")
             self._recovering = False
@@ -928,12 +927,7 @@ class DitadoApp:
                 log(f"update: v{APP_VERSION} -> v{remote} ({', '.join(updated)})")
                 self.notify(f"Atualizado para v{remote}! Reiniciando...")
                 time.sleep(1.5)
-                try:
-                    if self.icon:
-                        self.icon.stop()
-                except Exception:
-                    pass
-                restart_app()
+                restart_app(self.icon)
             else:
                 self.notify("Falha ao baixar a atualização. Veja o app.log.")
 

@@ -1,4 +1,4 @@
 {
-  "version": "1.5.1",
-  "changelog": "- Correção DEFINITIVA do bug do bloqueio de tela: o app agora recebe o aviso oficial do Windows no momento exato do desbloqueio (mesmo mecanismo usado por Teams/Slack), em vez de tentar adivinhar — e se reinicia sozinho em ~3 segundos\n- Também cobre a volta da suspensão (dormir/hibernar), com um vigia reserva por segurança\n- Registro detalhado no app.log de cada evento para diagnóstico"
+  "version": "1.5.2",
+  "changelog": "- Reinício automático (após atualização e após desbloqueio da tela) ficou determinístico: o relançador é disparado antes de o app encerrar, eliminando a corrida que às vezes impedia a reabertura."
 }
