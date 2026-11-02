@@ -1,4 +1,4 @@
 {
-  "version": "1.5.2",
-  "changelog": "- Reinício automático (após atualização e após desbloqueio da tela) ficou determinístico: o relançador é disparado antes de o app encerrar, eliminando a corrida que às vezes impedia a reabertura."
+  "version": "1.5.3",
+  "changelog": "- Blindagem contra 'atalho morto': o Windows às vezes desliga silenciosamente a escuta de teclado do app durante tumultos (ex.: atualização de outro programa). Agora uma ronda preventiva religa o atalho a cada 2 minutos — se a escuta cair, ela renasce sozinha, sem você precisar reiniciar o app."
 }

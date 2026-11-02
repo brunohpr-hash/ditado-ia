@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -879,6 +879,21 @@ class DitadoApp:
         except Exception as e:
             log(f"session_listener: erro fatal: {e}")
 
+    def _rehook_patrol(self):
+        """Ronda preventiva: o Windows remove silenciosamente da corrente
+        de hooks qualquer escuta que demore a responder (ex.: durante
+        atualizações/instalações de outros apps). Religar o atalho a cada
+        2 minutos garante que uma escuta podada renasce sozinha."""
+        while True:
+            time.sleep(120)
+            try:
+                if getattr(self, "recording", False) or getattr(self, "busy", False):
+                    continue
+                self.register_hotkey()
+                log("ronda: atalhos religados preventivamente")
+            except Exception as e:
+                log(f"ronda: falha ao religar ({e})")
+
     def _watchdog(self):
         """Reserva: detecta suspensao por salto do relogio (caso o evento
         oficial falhe em alguma maquina)."""
@@ -1228,6 +1243,7 @@ class DitadoApp:
         # recuperação pós bloqueio/suspensão: canal oficial + reserva
         threading.Thread(target=self._session_listener, daemon=True).start()
         threading.Thread(target=self._watchdog, daemon=True).start()
+        threading.Thread(target=self._rehook_patrol, daemon=True).start()
 
         menu = pystray.Menu(
             pystray.MenuItem(f"Atalho: segure {self.cfg['hotkey'].upper()} e fale",
