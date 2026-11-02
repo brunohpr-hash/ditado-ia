@@ -1,47 +1,42 @@
 @echo off
-chcp 65001 >nul
-title Ditado IA — Instalador
+title Ditado IA - Instalador
 echo ============================================
-echo   DITADO IA — instalacao no Windows
+echo   DITADO IA - instalacao no Windows
 echo ============================================
 echo.
 
-where python >nul 2>nul
-if errorlevel 1 (
+set PYEXE=
+where python >nul 2>nul && set PYEXE=python
+if not defined PYEXE (
+    where py >nul 2>nul && set PYEXE=py -3
+)
+if not defined PYEXE (
     echo [ERRO] Python nao encontrado.
-    echo Baixe em https://www.python.org/downloads/ e marque
-    echo a opcao "Add Python to PATH" durante a instalacao.
+    echo Instale em https://www.python.org/downloads/
+    echo IMPORTANTE: marque "Add Python to PATH" na instalacao.
     pause
     exit /b 1
 )
 
 echo [1/3] Criando ambiente virtual...
-python -m venv "%~dp0venv"
+if not exist "%~dp0venv" %PYEXE% -m venv "%~dp0venv"
 
 echo [2/3] Instalando dependencias...
-"%~dp0venv\Scripts\pip" install --quiet -r "%~dp0requirements.txt"
+"%~dp0venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
+"%~dp0venv\Scripts\python.exe" -m pip install --quiet -r "%~dp0requirements.txt"
 
-echo [3/3] Criando atalhos (inicializacao + area de trabalho)...
+echo [3/3] Criando atalhos...
 set SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DitadoIA.bat
 echo @echo off > "%SHORTCUT%"
 echo start "" "%~dp0venv\Scripts\pythonw.exe" "%~dp0main.py" >> "%SHORTCUT%"
 
-rem atalho .lnk na area de trabalho (com icone proprio)
-powershell -NoProfile -Command ^
-  "$ws = New-Object -ComObject WScript.Shell;" ^
-  "$lnk = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Ditado IA.lnk');" ^
-  "$lnk.TargetPath = '%~dp0venv\Scripts\pythonw.exe';" ^
-  "$lnk.Arguments = '\"%~dp0main.py\"';" ^
-  "$lnk.WorkingDirectory = '%~dp0';" ^
-  "$lnk.IconLocation = '%~dp0ditado.ico';" ^
-  "$lnk.Description = 'Ditado IA - ditado por voz com correcao de IA';" ^
-  "$lnk.Save()"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Ditado IA.lnk'); $s.TargetPath = '%~dp0venv\Scripts\pythonw.exe'; $s.Arguments = '\"%~dp0main.py\"'; $s.WorkingDirectory = '%~dp0'; $s.IconLocation = '%~dp0ditado.ico'; $s.Save()"
 
 echo.
 echo ============================================
-echo   Instalado! Iniciando o Ditado IA...
-echo   (icone azul de microfone na bandeja,
-echo    perto do relogio)
+echo   Instalacao concluida!
+echo   O app abrira agora - cole sua chave Groq.
+echo   Atalho padrao: ALT+V
 echo ============================================
 start "" "%~dp0venv\Scripts\pythonw.exe" "%~dp0main.py"
 exit /b 0
