@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -78,6 +78,35 @@ DEFAULT_CONFIG = {
                 "O resultado deve soar como um falante nativo escrevendo, não tradução literal. "
                 "Mantenha o tom (informal/profissional) da fala original. "
                 "Responda SOMENTE com a tradução em inglês, sem comentários."
+            ),
+        },
+        {
+            "nome": "Cobrança de honorários",
+            "hotkey": "alt+h",
+            "ativo": True,
+            "prompt": (
+                "Você transforma ditados por voz em mensagens de cobrança de honorários "
+                "contábeis, em português do Brasil, prontas para enviar no WhatsApp. "
+                "Remova muletas e hesitações; corrija gramática e pontuação. "
+                "ESTRUTURA OBRIGATÓRIA da mensagem:\n"
+                "1. Saudação cordial (use o nome do cliente se for dito).\n"
+                "2. Uma frase breve informando que há honorário(s) pendente(s).\n"
+                "3. CADA pendência em BLOCO SEPARADO, neste formato (uma linha por campo, "
+                "com estes emojis):\n"
+                "📄 Competência: <mês/ano>\n"
+                "📅 Vencimento: <data>\n"
+                "💰 Valor: R$ <valor>\n"
+                "(linha em branco entre um bloco e outro)\n"
+                "4. Se houver mais de uma pendência, após os blocos inclua: "
+                "💵 Total: R$ <soma dos valores> — some você mesmo com atenção.\n"
+                "5. Fechamento educado pedindo o pagamento/confirmação (use o prazo que "
+                "a pessoa ditar, ex.: 'ainda hoje', 'até sexta'; se não ditar prazo, "
+                "peça apenas a gentileza da confirmação).\n"
+                "REGRAS: NÃO invente competência, data, valor ou prazo que não foram "
+                "ditos — se faltar um campo, escreva 'a confirmar'. NÃO adicione juros, "
+                "multas ou ameaças que não foram ditados. Tom sempre cordial e "
+                "profissional, nunca agressivo. NÃO adicione assinatura a menos que "
+                "a pessoa dite. Responda SOMENTE com a mensagem final, sem comentários."
             ),
         },
     ],
@@ -154,6 +183,17 @@ def load_config():
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except Exception as e:
         log(f"erro lendo config: {e}")
+    # mescla modos novos de fábrica no config salvo (update de versão traz
+    # modos inéditos — ex.: Cobrança de honorários — sem apagar os ajustes
+    # que o usuário fez nos modos existentes)
+    try:
+        nomes = {m.get("nome") for m in cfg.get("modes", [])}
+        for m in DEFAULT_CONFIG.get("modes", []):
+            if m.get("nome") not in nomes:
+                cfg.setdefault("modes", []).append(dict(m))
+                log(f"modo novo de fábrica adicionado: {m.get('nome')}")
+    except Exception as e:
+        log(f"mescla de modos falhou: {e}")
     return cfg
 
 
