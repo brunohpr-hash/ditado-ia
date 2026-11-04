@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -589,6 +589,7 @@ class DitadoApp:
         self.recording_toggle = False  # estado do modo toggle (mãos livres)
         self._economy_notified = False  # aviso de modo economia (1x por sessão)
         self._recovering = False  # evita recuperações simultâneas
+        self._last_key_evt = 0.0  # pulso da escuta global (sentinela do hook)
         self.icon = None
         self.overlay = None
         self._hotkey_handle = None
@@ -796,6 +797,17 @@ class DitadoApp:
             keyboard.unhook_all_hotkeys()
         except Exception:
             pass
+        # sentinela de vida: escuta TODO evento de tecla só para marcar o pulso
+        # (se este hook for podado pelo Windows, a ronda detecta via teste F24)
+        try:
+            if getattr(self, "_pulse_hook", None) is not None:
+                try:
+                    keyboard.unhook(self._pulse_hook)
+                except Exception:
+                    pass
+            self._pulse_hook = keyboard.on_press(self._pulse)
+        except Exception:
+            self._pulse_hook = None
         self._hotkey_handle = keyboard.add_hotkey(
             self.cfg["hotkey"], self.on_hotkey,
             suppress=bool(self.cfg.get("suppress_keys", True)),
@@ -919,18 +931,44 @@ class DitadoApp:
         except Exception as e:
             log(f"session_listener: erro fatal: {e}")
 
+    def _pulse(self, _evt=None):
+        # chamado em QUALQUER evento de teclado — é o batimento cardíaco da escuta
+        self._last_key_evt = time.monotonic()
+
     def _rehook_patrol(self):
-        """Ronda preventiva: o Windows remove silenciosamente da corrente
-        de hooks qualquer escuta que demore a responder (ex.: durante
-        atualizações/instalações de outros apps). Religar o atalho a cada
-        2 minutos garante que uma escuta podada renasce sozinha."""
+        """Ronda preventiva COM verificação real: religa os atalhos a cada
+        2 minutos e TESTA se a escuta global está viva injetando uma tecla
+        fantasma (F24 — não existe em teclado físico). A injeção passa pela
+        corrente de hooks do Windows: se o nosso pulso não sentir, o gancho
+        foi podado de verdade (religar não basta — caso de campo 04/11/2026:
+        ronda dizia 'religados' e o Alt+V seguia morto) → reinício completo."""
+        falhas = 0
         while True:
             time.sleep(120)
             try:
-                if getattr(self, "recording", False) or getattr(self, "busy", False):
+                if getattr(self, "recording", False) or getattr(self, "busy", False) \
+                        or self._recovering:
                     continue
                 self.register_hotkey()
-                log("ronda: atalhos religados preventivamente")
+                # teste de vida: injeta F24 e espera o pulso
+                t0 = time.monotonic()
+                try:
+                    keyboard.press_and_release("f24")
+                except Exception:
+                    pass
+                time.sleep(1.0)
+                if self._last_key_evt >= t0:
+                    falhas = 0
+                    log("ronda: atalhos religados e escuta VERIFICADA viva")
+                else:
+                    falhas += 1
+                    log(f"ronda: escuta NAO respondeu ao teste ({falhas}x)")
+                    if falhas >= 2:
+                        log("ronda: gancho morto confirmado — reiniciando o app")
+                        falhas = 0
+                        self.notify("Escuta do teclado travou — reiniciando sozinho…")
+                        restart_app(self.icon)
+                        return
             except Exception as e:
                 log(f"ronda: falha ao religar ({e})")
 

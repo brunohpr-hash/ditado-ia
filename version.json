@@ -1,4 +1,4 @@
 {
-  "version": "1.5.4",
-  "changelog": "Novo modo 'Cobrança de honorários' (Alt+H): dite as pendências e a mensagem sai estruturada em blocos — 📄 Competência / 📅 Vencimento / 💰 Valor — com total somado e fechamento cordial. Perfeito para WhatsApp de cliente. O modo entra automaticamente na sua lista (Configurações > Modos) sem mexer nos existentes."
+  "version": "1.5.5",
+  "changelog": "Ronda com prova de vida: além de religar os atalhos a cada 2 min, o app agora TESTA se a escuta do teclado está realmente viva (tecla fantasma F24). Se o Windows tiver podado o gancho de vez (caso raro pós-inicialização), o app se reinicia sozinho em até 4 min — sem precisar sair e abrir de novo na mão."
 }
