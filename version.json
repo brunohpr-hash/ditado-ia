@@ -1,4 +1,4 @@
 {
-  "version": "1.5.7",
-  "changelog": "Blindagem anti-disparo-fantasma: os atalhos ficam surdos durante o teste de vida da ronda e a memoria de teclas presas e limpa a cada ciclo — o teste interno jamais pode acionar uma acao real."
+  "version": "1.5.8",
+  "changelog": "Fim do ditado que some em silêncio: (1) a cópia para a área de transferência agora é VERIFICADA com até 5 tentativas (Excel/outros apps que seguram o clipboard não engolem mais o texto); (2) se o clipboard falhar, o texto é digitado direto no campo; (3) o texto ditado PERMANECE no Ctrl+V — se a colagem automática não pegar, basta colar manualmente, sem refalar nada; (4) toda falha agora avisa com som e notificação (gravação vazia, transcrição vazia, entrega impossível) — nunca mais 'nada aconteceu'. Lembrete: o Histórico da bandeja guarda os últimos 50 ditados."
 }

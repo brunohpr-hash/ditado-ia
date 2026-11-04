@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -597,23 +597,47 @@ class DitadoApp:
 
     # ---------- texto -> cursor
     def paste_text(self, text):
+        """Entrega o texto no campo ativo. REGRA: a fala do usuário NUNCA
+        pode se perder em silêncio (caso de campo 04/11/2026: ditado longo
+        sumindo sem erro). Defesas: cópia VERIFICADA com retentativas,
+        fallback para digitação direta, texto permanece no clipboard após
+        colar (recuperação manual via Ctrl+V) e aviso sonoro+notificação
+        quando a entrega não puder ser comprovada."""
         if self.cfg.get("paste_mode") == "type":
             keyboard.write(text, delay=0.005)
             return
-        old = None
-        try:
-            old = pyperclip.paste()
-        except Exception:
-            pass
-        pyperclip.copy(text)
-        time.sleep(0.08)
+        # 1) copia com verificação: o Windows pode negar acesso ao clipboard
+        # se outro app o estiver segurando (Excel/RDP fazem isso) — pyperclip
+        # falha OU a cópia simplesmente não "pega". Tenta até 5x comprovando.
+        copiado = False
+        for tentativa in range(5):
+            try:
+                pyperclip.copy(text)
+                time.sleep(0.06)
+                if pyperclip.paste() == text:
+                    copiado = True
+                    break
+            except Exception as e:
+                log(f"paste: clipboard ocupado ({tentativa+1}/5): {e}")
+            time.sleep(0.15)
+        if not copiado:
+            # 2) plano B: digita o texto char a char direto no campo
+            log("paste: clipboard indisponível — digitando direto no campo")
+            try:
+                keyboard.write(text, delay=0.005)
+                return
+            except Exception as e:
+                log(f"paste: digitação direta também falhou: {e}")
+                beep(300, 300)
+                self.notify("⚠️ Não consegui entregar o texto! Ele está no "
+                            "Histórico (bandeja) — abra e use Copiar.")
+                return
+        # 3) cola — e NÃO restaura o clipboard antigo: o texto ditado fica
+        # na área de transferência de propósito. Se o Ctrl+V virtual não
+        # pegar no app de destino (campo perdeu o foco, app bloqueia paste),
+        # o usuário recupera TUDO com um Ctrl+V manual, zero refala.
         keyboard.send("ctrl+v")
         time.sleep(0.25)
-        if old is not None:
-            try:
-                pyperclip.copy(old)
-            except Exception:
-                pass
 
     # ---------- ciclo de ditado
     def on_hotkey(self, mode=None):
@@ -719,7 +743,15 @@ class DitadoApp:
             beep(660, 80)
             if audio is None or len(audio) < self.cfg["sample_rate"] // 4:
                 self._overlay_hide()
-                return  # gravação curta demais
+                # NUNCA morrer em silêncio: se o usuário falou e o app captou
+                # quase nada, algo quebrou (mic errado, escuta do soltar da
+                # tecla falhou) — ele precisa SABER, não descobrir no campo vazio
+                beep(300, 300)
+                self.notify("⚠️ Gravação vazia ou curta demais — nada foi "
+                            "transcrito. Confira o microfone e tente de novo.")
+                log("ditado abortado: áudio vazio/curto "
+                    f"({0 if audio is None else len(audio)} amostras)")
+                return
 
             self._overlay_show("✨  Transcrevendo e corrigindo...")
             wav = wav_bytes(audio, self.cfg["sample_rate"])
@@ -740,6 +772,8 @@ class DitadoApp:
                 log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
                 final = raw  # transcrição ok; entrega sem correção
 
+            if not final:
+                final = raw  # IA devolveu vazio? entrega o bruto — nunca nada
             if final:
                 self.paste_text(final)
                 append_history({
@@ -748,6 +782,11 @@ class DitadoApp:
                     "final": final,
                     "modo": mode_name or "padrão",
                 })
+            else:
+                beep(300, 300)
+                self.notify("⚠️ A transcrição voltou vazia (fala inaudível?). "
+                            "Nada foi colado — tente de novo.")
+                log("ditado: transcrição vazia (raw e final vazios)")
         finally:
             self._overlay_hide()
             self.recording_toggle = False
