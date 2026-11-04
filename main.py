@@ -28,7 +28,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -590,6 +590,7 @@ class DitadoApp:
         self._economy_notified = False  # aviso de modo economia (1x por sessão)
         self._recovering = False  # evita recuperações simultâneas
         self._last_key_evt = 0.0  # pulso da escuta global (sentinela do hook)
+        self._probe_until = 0.0  # janela do teste de vida: hotkeys surdos
         self.icon = None
         self.overlay = None
         self._hotkey_handle = None
@@ -616,6 +617,9 @@ class DitadoApp:
 
     # ---------- ciclo de ditado
     def on_hotkey(self, mode=None):
+        if time.monotonic() < getattr(self, "_probe_until", 0):
+            log("atalho ignorado: janela do teste de vida")
+            return
         """mode=None -> ditado padrão; mode=dict -> modo customizado (ex.: e-mail)."""
         if self.cfg.get("mode", "segurar") == "toggle":
             # mãos livres: 1º toque começa, 2º toque encerra
@@ -949,7 +953,19 @@ class DitadoApp:
                 if getattr(self, "recording", False) or getattr(self, "busy", False) \
                         or self._recovering:
                     continue
+                # limpa teclas "presas" na memoria da lib (apertar registrado
+                # sem o soltar — re-registro no meio de um atalho faz isso).
+                # Estado preso + evento fantasma = atalho re-disparando sozinho
+                # (caso de campo 04/11/2026: Ata iniciando/encerrando reunioes
+                # em loop a cada ronda).
+                try:
+                    keyboard._pressed_events.clear()
+                except Exception:
+                    pass
                 self.register_hotkey()
+                # imunidade: enquanto o teste roda, os atalhos do app ficam
+                # surdos — a tecla fantasma JAMAIS pode virar acao real
+                self._probe_until = time.monotonic() + 2.0
                 t0 = time.monotonic()
                 injetou = False
                 if os.name == "nt":
