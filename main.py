@@ -509,87 +509,197 @@ def restart_app(icon=None):
 # ---------------------------------------------------------------- overlay
 
 class Overlay:
-    """Caixinha flutuante no centro inferior: texto ao vivo + ondas animadas."""
+    """Pílula flutuante no centro inferior (estilo Speakly): ✕ | texto ao vivo | ondinha | ✓.
 
-    BG = "#1e1e28"
-    ACCENT = "#34d17b"  # verde das ondas
-    N_BARS = 24
+    - Cresce horizontalmente conforme o texto da prévia chega (até ~60% da tela);
+      texto sempre centralizado; quando não cabe, mostra o final (o que está sendo dito).
+    - ✕ cancela o ditado (descarta o áudio); ✓ encerra e envia (transcreve + cola).
+    - A janela NÃO rouba o foco do app alvo (WS_EX_NOACTIVATE no Windows) — senão o
+      clique no botão tiraria o cursor do campo e o Ctrl+V colaria no lugar errado.
+    """
+
+    BG = "#1b1c22"
+    BORDER = "#2c2e36"
+    TEXT = "#ffffff"
+    MUTED = "#8a8d96"
+    ACCENT = "#34d17b"  # verde das ondas (pedido do Bruno)
+    BTN = "#2f3139"
+    BTN_HOVER = "#3d4049"
+    KEY = "#010203"  # cor-chave transparente (cantos arredondados)
+    H = 46
+    MIN_W = 260
+    N_BARS = 14
 
     def __init__(self):
         self._root = None
-        self._label = None
         self._canvas = None
+        self._font = None
         self._queue = []
         self._lock = threading.Lock()
         self._visible = False
-        self._level_fn = None   # callback que devolve o nível do mic (0..1)
+        self._level_fn = None
         self._phase = 0.0
+        self._text = ""
+        self._placeholder = ""
+        self._state = "listening"  # listening | processing
+        self._on_cancel = None
+        self._on_send = None
+        self._hover = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    # ---------------- thread do Tk
     def _loop(self):
         import tkinter as tk
+        import tkinter.font as tkfont
+        import math
+
         self._root = tk.Tk()
-        self._root.overrideredirect(True)  # sem borda/título
+        self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
+        self._root.configure(bg=self.KEY)
+        transparent = False
         try:
-            self._root.attributes("-alpha", 0.94)
+            self._root.attributes("-transparentcolor", self.KEY)
+            transparent = True
         except Exception:
-            pass
-        self._root.configure(bg=self.BG)
-
-        self._label = tk.Label(
-            self._root, text="", font=("Segoe UI", 11),
-            fg="#ffffff", bg=self.BG, padx=18, pady=(10),
-            wraplength=560, justify="left",
-        )
-        self._label.pack(fill="x")
-
-        self._canvas = tk.Canvas(
-            self._root, width=600, height=34, bg=self.BG,
-            highlightthickness=0, bd=0,
-        )
-        self._canvas.pack(pady=(0, 8))
-
+            self._root.configure(bg=self.BG)
+        self._font = tkfont.Font(family="Segoe UI", size=11)
+        self._canvas = tk.Canvas(self._root, width=self.MIN_W, height=self.H,
+                                 bg=self.KEY if transparent else self.BG,
+                                 highlightthickness=0, bd=0, cursor="arrow")
+        self._canvas.pack()
         self._root.withdraw()
 
-        def reposition():
-            self._root.update_idletasks()
-            w = max(self._root.winfo_reqwidth(), 620)
-            h = self._root.winfo_reqheight()
-            sw = self._root.winfo_screenwidth()
-            sh = self._root.winfo_screenheight()
-            self._root.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - 70}")
+        def no_activate():
+            # Windows: janela que não recebe foco ao ser clicada
+            try:
+                import ctypes
+                hwnd = ctypes.windll.user32.GetParent(self._root.winfo_id())
+                GWL_EXSTYLE = -20
+                WS_EX_NOACTIVATE = 0x08000000
+                WS_EX_TOOLWINDOW = 0x00000080
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                ctypes.windll.user32.SetWindowLongW(
+                    hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+            except Exception:
+                pass
 
-        def draw_waves():
-            self._canvas.delete("all")
+        def rounded(x0, y0, x1, y1, r, **kw):
+            pts = [x0+r, y0, x1-r, y0, x1, y0, x1, y0+r, x1, y1-r, x1, y1,
+                   x1-r, y1, x0+r, y1, x0, y1, x0, y1-r, x0, y0+r, x0, y0]
+            return self._canvas.create_polygon(pts, smooth=True, **kw)
+
+        def layout_width():
+            sw = self._root.winfo_screenwidth()
+            max_w = int(sw * 0.6)
+            txt = self._text or self._placeholder
+            tw = self._font.measure(txt) if txt else 0
+            # 14 margem + 30 botão + 14 + texto + 14 + ondas(≈ N_BARS*5) + 14 + 30 botão + 14
+            fixed = 14 + 30 + 14 + 14 + self.N_BARS * 5 + 14 + 30 + 14
+            if self._state == "processing":
+                fixed = 14 + 30 + 14 + 14 + 14  # só ✕ e texto
+            w = max(self.MIN_W, min(max_w, fixed + tw))
+            return w, max(40, w - fixed)
+
+        def fit_text(txt, avail):
+            if not txt or self._font.measure(txt) <= avail:
+                return txt
+            # mostra o FINAL (é o que está sendo falado agora)
+            ell = "…"
+            lo, hi = 0, len(txt)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if self._font.measure(ell + txt[mid:]) <= avail:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            return ell + txt[lo:]
+
+        def draw():
+            c = self._canvas
+            c.delete("all")
             if not self._visible:
                 return
-            import math
+            w, avail = layout_width()
+            h = self.H
+            c.config(width=w, height=h)
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            self._root.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - 80}")
+
+            rounded(1, 1, w - 1, h - 1, h // 2, fill=self.BG, outline=self.BORDER)
+            cy = h / 2
+            # ✕ (cancelar) — sempre disponível
+            bx = 14 + 15
+            fill = self.BTN_HOVER if self._hover == "cancel" else self.BTN
+            c.create_oval(bx - 15, cy - 15, bx + 15, cy + 15, fill=fill, outline="", tags="btn_cancel")
+            c.create_line(bx - 5, cy - 5, bx + 5, cy + 5, fill=self.TEXT, width=2, tags="btn_cancel")
+            c.create_line(bx - 5, cy + 5, bx + 5, cy - 5, fill=self.TEXT, width=2, tags="btn_cancel")
+
+            if self._state == "processing":
+                # texto de status + ✕ apenas
+                tx0 = 14 + 30 + 14
+                c.create_text(tx0 + avail / 2, cy, text=fit_text(self._text, avail),
+                              fill=self.MUTED, font=self._font, anchor="center")
+                return
+
+            # ✓ (enviar)
+            sx = w - 14 - 15
+            fill = self.BTN_HOVER if self._hover == "send" else self.BTN
+            c.create_oval(sx - 15, cy - 15, sx + 15, cy + 15, fill=fill, outline="", tags="btn_send")
+            c.create_line(sx - 6, cy, sx - 2, cy + 4, sx + 6, cy - 5, fill=self.TEXT,
+                          width=2, capstyle="round", joinstyle="round", tags="btn_send")
+
+            # ondinha (à esquerda do ✓)
             lvl = 0.0
             if self._level_fn:
                 try:
                     lvl = max(0.0, min(1.0, float(self._level_fn())))
                 except Exception:
                     lvl = 0.0
-            self._phase += 0.35
-            cw = int(self._canvas.winfo_width()) or 600
-            ch = 34
-            mid = ch / 2
-            n = self.N_BARS
-            total_w = n * 14
-            x0 = (cw - total_w) / 2
-            for i in range(n):
-                # cada barra oscila com fase própria; altura = base + voz
-                osc = (math.sin(self._phase + i * 0.55) + 1) / 2  # 0..1
-                h_base = 3 + osc * 4
-                h_voice = lvl * 22 * (0.4 + 0.6 * osc)
-                bh = min(mid - 2, h_base + h_voice)
-                x = x0 + i * 14
-                self._canvas.create_rectangle(
-                    x, mid - bh, x + 7, mid + bh,
-                    fill=self.ACCENT, outline="",
-                )
+            self._phase += 0.4
+            wave_w = self.N_BARS * 5
+            wx0 = sx - 15 - 14 - wave_w
+            for i in range(self.N_BARS):
+                osc = (math.sin(self._phase + i * 0.7) + 1) / 2
+                bh = 2 + osc * 2 + lvl * 12 * (0.4 + 0.6 * osc)
+                x = wx0 + i * 5
+                c.create_rectangle(x, cy - bh, x + 3, cy + bh, fill=self.ACCENT, outline="")
+
+            # texto (centralizado no espaço disponível)
+            tx0 = 14 + 30 + 14
+            txt = self._text
+            color = self.TEXT
+            if not txt:
+                txt, color = self._placeholder, self.MUTED
+            c.create_text(tx0 + avail / 2, cy, text=fit_text(txt, avail),
+                          fill=color, font=self._font, anchor="center")
+
+        def on_click(which):
+            def handler(_evt=None):
+                cb = self._on_cancel if which == "cancel" else self._on_send
+                if cb:
+                    try:
+                        cb()
+                    except Exception as e:
+                        log(f"overlay: callback {which} falhou: {e}")
+            return handler
+
+        def on_motion(evt):
+            items = self._canvas.find_overlapping(evt.x, evt.y, evt.x, evt.y)
+            tags = set()
+            for it in items:
+                tags.update(self._canvas.gettags(it))
+            new = "cancel" if "btn_cancel" in tags else ("send" if "btn_send" in tags else None)
+            if new != self._hover:
+                self._hover = new
+                self._canvas.config(cursor="hand2" if new else "arrow")
+
+        self._canvas.tag_bind("btn_cancel", "<Button-1>", on_click("cancel"))
+        self._canvas.tag_bind("btn_send", "<Button-1>", on_click("send"))
+        self._canvas.bind("<Motion>", on_motion)
+        self._canvas.bind("<Leave>", lambda e: setattr(self, "_hover", None))
 
         def poll():
             with self._lock:
@@ -597,40 +707,59 @@ class Overlay:
                 self._queue.clear()
             for act, arg in actions:
                 if act == "show":
-                    self._label.config(text=arg)
+                    self._placeholder = arg
+                    self._text = ""
+                    self._state = "listening"
+                    self._hover = None
                     if not self._visible:
                         self._visible = True
                         self._root.deiconify()
-                    reposition()
+                        self._root.update_idletasks()
+                        no_activate()
                 elif act == "text":
-                    self._label.config(text=arg)
-                    reposition()
+                    self._text = arg
+                elif act == "processing":
+                    self._state = "processing"
+                    self._text = arg
+                    self._level_fn = None
                 elif act == "level_fn":
                     self._level_fn = arg
+                elif act == "callbacks":
+                    self._on_cancel, self._on_send = arg
                 elif act == "hide":
                     self._visible = False
                     self._level_fn = None
+                    self._text = ""
                     self._root.withdraw()
             if self._visible:
-                draw_waves()
+                draw()
             self._root.after(50, poll)
 
         self._root.after(50, poll)
         self._root.mainloop()
 
-    def show(self, text):
+    # ---------------- API (thread-safe)
+    def show(self, placeholder):
         with self._lock:
-            self._queue.append(("show", text))
+            self._queue.append(("show", placeholder))
 
     def set_text(self, text):
-        """Atualiza só o texto (prévia ao vivo), mantendo a caixinha aberta."""
+        """Prévia ao vivo: o texto cresce a pílula e fica centralizado."""
         with self._lock:
             self._queue.append(("text", text))
 
+    def set_processing(self, text):
+        """Estado 'transcrevendo': some ✓ e ondas; mantém ✕."""
+        with self._lock:
+            self._queue.append(("processing", text))
+
     def set_level_source(self, fn):
-        """Define a função que fornece o nível do microfone (0..1)."""
         with self._lock:
             self._queue.append(("level_fn", fn))
+
+    def set_callbacks(self, on_cancel, on_send):
+        with self._lock:
+            self._queue.append(("callbacks", (on_cancel, on_send)))
 
     def hide(self):
         with self._lock:
@@ -649,6 +778,8 @@ class DitadoApp:
         self._recovering = False  # evita recuperações simultâneas
         self._last_key_evt = 0.0  # pulso da escuta global (sentinela do hook)
         self._probe_until = 0.0  # janela do teste de vida: hotkeys surdos
+        self._cancel_requested = False  # ✕ da pílula: descarta o ditado atual
+        self._send_requested = False    # ✓ da pílula: encerra e envia agora
         self.icon = None
         self.overlay = None
         self._hotkey_handle = None
@@ -736,9 +867,15 @@ class DitadoApp:
         mode_hotkey = (mode or {}).get("hotkey") or self.cfg["hotkey"]
         try:
             beep(880, 100)
-            label = f"🎙️  {mode_name} — Escutando..." if mode_name else "🎙️  Escutando..."
-            hint = ("  (solte para enviar)" if not toggle_mode
-                    else f"  ({mode_hotkey.upper()} para parar)")
+            self._cancel_requested = False
+            self._send_requested = False
+            label = f"{mode_name} — fale…" if mode_name else "Fale…"
+            hint = ("" if not toggle_mode else f"  ({mode_hotkey.upper()} para parar)")
+            if self.overlay and self.cfg.get("show_overlay", True):
+                self.overlay.set_callbacks(
+                    on_cancel=lambda: setattr(self, "_cancel_requested", True),
+                    on_send=lambda: setattr(self, "_send_requested", True),
+                )
             self._overlay_show(label + hint)
             self.recorder.start()
             if self.overlay and self.cfg.get("show_overlay", True):
@@ -773,10 +910,7 @@ class DitadoApp:
                         parcial = pipe_prev.transcribe(
                             wav_bytes(snap, self.cfg["sample_rate"]))
                         if parcial and not stop_preview.is_set():
-                            # mostra só o final, para caber na caixinha
-                            if len(parcial) > 220:
-                                parcial = "…" + parcial[-220:]
-                            self.overlay.set_text(parcial)
+                            self.overlay.set_text(parcial)  # a pílula corta sozinha
                     except Exception:
                         pass  # prévia é melhor-esforço; o ditado final não depende dela
 
@@ -785,19 +919,31 @@ class DitadoApp:
 
             key = mode_hotkey.split("+")[-1].strip()
             t0 = time.time()
+
+            def botao_apertado():
+                return self._cancel_requested or self._send_requested
+
             if toggle_mode:
-                while self.recording_toggle:
+                while self.recording_toggle and not botao_apertado():
                     if time.time() - t0 > self.cfg.get("max_seconds", 300):
                         self.recording_toggle = False
                         break
                     time.sleep(0.05)
+                self.recording_toggle = False
             else:
-                while keyboard.is_pressed(key):
+                # segurar: solta a tecla OU clica ✓/✕ na pílula. Depois do clique,
+                # a tecla pode continuar pressionada — não esperamos por ela.
+                while keyboard.is_pressed(key) and not botao_apertado():
                     if time.time() - t0 > self.cfg.get("max_seconds", 300):
                         break
                     time.sleep(0.03)
             stop_preview.set()
             audio = self.recorder.stop()
+            if self._cancel_requested:
+                self._overlay_hide()
+                beep(440, 80)
+                log("ditado cancelado pelo botão ✕")
+                return
             beep(660, 80)
             if audio is None or len(audio) < self.cfg["sample_rate"] // 4:
                 self._overlay_hide()
@@ -811,7 +957,8 @@ class DitadoApp:
                     f"({0 if audio is None else len(audio)} amostras)")
                 return
 
-            self._overlay_show("✨  Transcrevendo e corrigindo...")
+            if self.overlay and self.cfg.get("show_overlay", True):
+                self.overlay.set_processing("Transcrevendo e corrigindo…")
             wav = wav_bytes(audio, self.cfg["sample_rate"])
             pipe = Pipeline(self.cfg)
             try:
@@ -823,12 +970,18 @@ class DitadoApp:
                 self.notify("Sem conexão com a IA. Áudio salvo em pendentes.")
                 beep(300, 300)
                 return
+            if self._cancel_requested:
+                log("ditado cancelado pelo botão ✕ (durante a transcrição)")
+                return
             try:
                 final = pipe.cleanup(raw, prompt_override=mode_prompt)
             except Exception as e:
                 body = getattr(getattr(e, "response", None), "text", "")
                 log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
                 final = raw  # transcrição ok; entrega sem correção
+            if self._cancel_requested:
+                log("ditado cancelado pelo botão ✕ (durante a correção)")
+                return
 
             if not final:
                 final = raw  # IA devolveu vazio? entrega o bruto — nunca nada
