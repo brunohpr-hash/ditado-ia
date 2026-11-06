@@ -10,6 +10,7 @@ Pipeline: microfone -> Whisper (Groq/OpenAI) -> correção por IA -> colar texto
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -28,7 +29,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.6.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -47,7 +48,8 @@ DEFAULT_CONFIG = {
     "api_key": "",
     "cleanup": True,
     "cleanup_level": "normal",  # leve | normal | formal
-    "language": "auto",  # auto detecta PT/EN/ES etc.
+    "language": "pt",  # pt | en | es | auto — declarar o idioma melhora MUITO a precisão
+    "dictionary": [],  # dicionário pessoal: nomes, siglas e termos técnicos a preservar
     "sample_rate": 16000,
     "paste_mode": "clipboard",  # clipboard (ctrl+v) | type (digita char a char)
     "max_seconds": 300,
@@ -194,7 +196,60 @@ def load_config():
                 log(f"modo novo de fábrica adicionado: {m.get('nome')}")
     except Exception as e:
         log(f"mescla de modos falhou: {e}")
+    # v1.6.0: idioma declarado. 'auto' deixa o Whisper adivinhar a cada ditado e
+    # erra mais em nomes/siglas; migra UMA vez para pt (reversível nas Configurações).
+    if cfg.get("language") in ("auto", "", None) and not cfg.get("_lang_migrated"):
+        cfg["language"] = "pt"
+        cfg["_lang_migrated"] = True
+        log("idioma migrado de 'auto' para 'pt' (v1.6.0)")
+    if not isinstance(cfg.get("dictionary"), list):
+        cfg["dictionary"] = []
     return cfg
+
+
+def dictionary_terms(cfg):
+    """Termos do dicionário pessoal, limpos e sem duplicatas (preserva ordem)."""
+    seen, out = set(), []
+    for t in cfg.get("dictionary", []) or []:
+        if t is None:
+            continue
+        t = str(t).strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def whisper_prompt(cfg, limit_chars=600):
+    """Prompt de contexto para o Whisper: lista de termos a reconhecer.
+
+    O Whisper aceita um 'prompt' curto (~224 tokens) que condiciona o vocabulário —
+    é o mecanismo oficial para nomes próprios e siglas. Mantemos curto: termos
+    demais são truncados pelo modelo e os primeiros têm prioridade.
+    """
+    terms = dictionary_terms(cfg)
+    if not terms:
+        return None
+    txt = ""
+    for t in terms:
+        cand = f"{txt}, {t}" if txt else t
+        if len(cand) > limit_chars:
+            break
+        txt = cand
+    return txt + "." if txt else None
+
+
+def dictionary_guard(cfg, limit=400):
+    """Instrução extra ao LLM para preservar/corrigir os termos do dicionário."""
+    terms = dictionary_terms(cfg)[:limit]
+    if not terms:
+        return ""
+    return (
+        "\n\nDICIONÁRIO PESSOAL (termos que a pessoa usa e que a transcrição costuma errar): "
+        + "; ".join(terms)
+        + ". Se um trecho da transcrição soar parecido com um destes termos, use a grafia "
+        "exata do dicionário. Nunca altere esses termos para sinônimos ou 'correções'."
+    )
 
 
 def save_config(cfg):
@@ -273,6 +328,9 @@ class Pipeline:
         data = {"model": p["stt_model"], "response_format": "json"}
         if self.cfg["language"] not in ("auto", "", None):
             data["language"] = self.cfg["language"]
+        wp = whisper_prompt(self.cfg)
+        if wp:
+            data["prompt"] = wp  # dicionário pessoal: condiciona o vocabulário
         r = requests.post(
             p["stt_url"],
             headers=self._headers(),
@@ -314,7 +372,7 @@ class Pipeline:
                 "model": p["llm_model"],
                 "temperature": 0.2,
                 "messages": [
-                    {"role": "system", "content": prompt + guard},
+                    {"role": "system", "content": prompt + dictionary_guard(self.cfg) + guard},
                     {"role": "user", "content": wrapped},
                 ],
             },
@@ -1176,11 +1234,13 @@ class DitadoApp:
                      state="readonly", width=18).grid(row=5, column=1, sticky="w")
 
         # Idioma
-        ttk.Label(frm, text="Idioma (auto = detecta sozinho):").grid(row=6, column=0, sticky="w")
-        lang_var = tk.StringVar(master=win, value=self.cfg.get("language", "auto"))
+        ttk.Label(frm, text="Idioma que você fala:").grid(row=6, column=0, sticky="w")
+        lang_var = tk.StringVar(master=win, value=self.cfg.get("language", "pt"))
         ttk.Combobox(frm, textvariable=lang_var,
-                     values=["auto", "pt", "en", "es"], state="readonly",
+                     values=["pt", "en", "es", "auto"], state="readonly",
                      width=18).grid(row=6, column=1, sticky="w")
+        ttk.Label(frm, text="declarar = mais preciso", foreground="#666").grid(
+            row=6, column=2, sticky="w")
 
         # Modo de colagem
         ttk.Label(frm, text="Inserir texto via:").grid(row=7, column=0, sticky="w")
@@ -1225,6 +1285,112 @@ class DitadoApp:
 
     def open_history(self):
         threading.Thread(target=self._history_window, daemon=True).start()
+
+    def open_dictionary(self):
+        threading.Thread(target=self._dictionary_window, daemon=True).start()
+
+    def _dictionary_window(self):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        win = tk.Tk()
+        win.title(f"{APP_NAME} — Dicionário pessoal")
+        win.geometry("560x520")
+        win.attributes("-topmost", True)
+
+        ttk.Label(win, text=(
+            "Nomes de clientes, siglas (DCTFWeb, PGDAS, eSocial), nomes da equipe, termos técnicos.\n"
+            "O Ditado passa a reconhecer e escrever exatamente assim."),
+            foreground="#444", justify="left").pack(anchor="w", padx=10, pady=(10, 4))
+
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=10)
+        novo_var = tk.StringVar(master=win)
+        ent = ttk.Entry(top, textvariable=novo_var, width=40)
+        ent.pack(side="left", padx=(0, 6))
+        ent.focus_set()
+
+        lst_frame = ttk.Frame(win)
+        lst_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        lst = tk.Listbox(lst_frame, selectmode="extended", height=14)
+        sb = ttk.Scrollbar(lst_frame, orient="vertical", command=lst.yview)
+        lst.configure(yscrollcommand=sb.set)
+        lst.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        count_var = tk.StringVar(master=win)
+
+        def refresh():
+            lst.delete(0, "end")
+            terms = dictionary_terms(self.cfg)
+            for t in terms:
+                lst.insert("end", t)
+            count_var.set(f"{len(terms)} termo(s). Os ~60 primeiros têm prioridade no reconhecimento.")
+
+        def adicionar(_=None):
+            raw = novo_var.get().strip()
+            if not raw:
+                return
+            # aceita vários de uma vez: "Padaria Central, DCTFWeb; Reinf" ou um por linha
+            novos = [t.strip() for t in re.split(r"[,;\n]+", raw) if t.strip()]
+            atual = dictionary_terms(self.cfg)
+            baixo = {t.lower() for t in atual}
+            add = [t for t in novos if t.lower() not in baixo]
+            self.cfg["dictionary"] = atual + add
+            save_config(self.cfg)
+            novo_var.set("")
+            refresh()
+            if add:
+                self.notify(f"{len(add)} termo(s) adicionado(s) ao dicionário.")
+
+        def remover():
+            sel = list(lst.curselection())
+            if not sel:
+                return
+            terms = dictionary_terms(self.cfg)
+            for i in sorted(sel, reverse=True):
+                if 0 <= i < len(terms):
+                    terms.pop(i)
+            self.cfg["dictionary"] = terms
+            save_config(self.cfg)
+            refresh()
+
+        def importar():
+            # cola uma lista grande de uma vez (um termo por linha ou separado por vírgula)
+            dlg = tk.Toplevel(win)
+            dlg.title("Importar vários termos")
+            dlg.geometry("460x360")
+            dlg.attributes("-topmost", True)
+            ttk.Label(dlg, text="Cole aqui — um por linha ou separados por vírgula/ponto e vírgula:").pack(
+                anchor="w", padx=10, pady=(10, 4))
+            txt = tk.Text(dlg, wrap="word", height=12)
+            txt.pack(fill="both", expand=True, padx=10)
+
+            def ok():
+                novo_var.set(txt.get("1.0", "end"))
+                dlg.destroy()
+                adicionar()
+
+            ttk.Button(dlg, text="Adicionar todos", command=ok).pack(pady=8)
+
+        def limpar():
+            if messagebox.askyesno(APP_NAME, "Apagar TODOS os termos do dicionário?", parent=win):
+                self.cfg["dictionary"] = []
+                save_config(self.cfg)
+                refresh()
+
+        ent.bind("<Return>", adicionar)
+        ttk.Button(top, text="Adicionar", command=adicionar).pack(side="left")
+        ttk.Button(top, text="Importar lista…", command=importar).pack(side="left", padx=6)
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Button(btns, text="Remover selecionado(s)", command=remover).pack(side="left")
+        ttk.Button(btns, text="Limpar tudo", command=limpar).pack(side="left", padx=6)
+        ttk.Label(win, textvariable=count_var, foreground="#666").pack(anchor="w", padx=10, pady=(0, 10))
+
+        refresh()
+        win.mainloop()
 
     def open_modes(self):
         threading.Thread(target=self._modes_window, daemon=True).start()
@@ -1402,6 +1568,7 @@ class DitadoApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Histórico", lambda: self.open_history()),
             pystray.MenuItem("Modos de ditado", lambda: self.open_modes()),
+            pystray.MenuItem("Dicionário pessoal", lambda: self.open_dictionary()),
             pystray.MenuItem("Transcrever pendentes", lambda: self.process_pending()),
             pystray.MenuItem("Configurações", lambda: self.open_settings()),
             pystray.MenuItem("Verificar atualizações",

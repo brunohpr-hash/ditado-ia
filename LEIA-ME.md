@@ -44,7 +44,8 @@ trabalho até a barra de tarefas — ou clica nele com o botão direito →
 |---|---|
 | 🎹 Atalho configurável | Padrão Alt+V; mude em Configurações → "Detectar" |
 | 🤖 Correção por IA | 3 níveis: leve / normal / formal |
-| 🌍 Multilíngue | Detecta o idioma automaticamente, até misturado |
+| 🌍 Idioma declarado | Português por padrão (mais preciso); 'auto' detecta sozinho, até misturado |
+| 📖 Dicionário pessoal | Nomes de clientes, siglas (DCTFWeb, PGDAS…) e termos técnicos escritos sempre certos |
 | 📜 Histórico | Todas as transcrições salvas; duplo clique copia |
 | 📴 Modo offline | Sem internet? O áudio fica guardado em "pendentes" para transcrever depois |
 | 🔔 Sons | Bip agudo = gravando; bip grave = processando |
