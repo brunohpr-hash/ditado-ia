@@ -46,6 +46,8 @@ trabalho até a barra de tarefas — ou clica nele com o botão direito →
 | 🤖 Correção por IA | 3 níveis: leve / normal / formal |
 | 🌍 Idioma declarado | Português por padrão (mais preciso); 'auto' detecta sozinho, até misturado |
 | 📖 Dicionário pessoal | Nomes de clientes, siglas (DCTFWeb, PGDAS…) e termos técnicos escritos sempre certos |
+| 🔄 Sincronização | Dicionário, modos e preferências iguais em todos os seus PCs (casa ↔ escritório) |
+| ✂️ Comando sobre seleção | Selecione um texto, segure o atalho e diga "deixa mais formal", "traduz", "resume"… |
 | 📜 Histórico | Todas as transcrições salvas; duplo clique copia |
 | 📴 Modo offline | Sem internet? O áudio fica guardado em "pendentes" para transcrever depois |
 | 🔔 Sons | Bip agudo = gravando; bip grave = processando |

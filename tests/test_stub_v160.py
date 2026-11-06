@@ -16,7 +16,7 @@ spec = importlib.util.spec_from_file_location("ditado", "/root/projetos/ditado-i
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-assert mod.APP_VERSION == "1.6.1", mod.APP_VERSION
+assert mod.APP_VERSION == "1.7.0", mod.APP_VERSION
 ver = json.loads(Path("/root/projetos/ditado-ia/version.json").read_text())
 assert ver["version"] == mod.APP_VERSION, ("version.json desalinhado", ver["version"])
 

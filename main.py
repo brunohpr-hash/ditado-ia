@@ -17,6 +17,8 @@ import threading
 import time
 import traceback
 import wave
+import shutil
+from base64 import b64decode, b64encode
 from datetime import datetime
 from pathlib import Path
 
@@ -29,13 +31,19 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
 CONFIG_PATH = APP_DIR / "config.json"
 HISTORY_PATH = APP_DIR / "historico.jsonl"
 PENDING_DIR = APP_DIR / "pendentes"
+SYNC_PATH = APP_DIR / "sync.json"  # {repo, github_token} — NUNCA vai para o repo público
+SYNC_FILE = "ditado.json"  # arquivo dentro do repo privado de dados
+# Chaves do config que viajam entre os PCs (preferências de máquina ficam de fora:
+# chave de API, atalhos de teclado, modo de colagem, overlay)
+SYNC_KEYS = ("dictionary", "dictionary_removed", "modes", "modes_removed", "language", "cleanup",
+             "cleanup_level", "selection_command", "selection_prompt")
 
 DEFAULT_CONFIG = {
     "hotkey": "alt+v",
@@ -50,6 +58,16 @@ DEFAULT_CONFIG = {
     "cleanup_level": "normal",  # leve | normal | formal
     "language": "pt",  # pt | en | es | auto — declarar o idioma melhora MUITO a precisão
     "dictionary": [],  # dicionário pessoal: nomes, siglas e termos técnicos a preservar
+    "selection_command": True,  # texto selecionado + atalho = comando por voz sobre a seleção
+    "selection_prompt": (
+        "Você edita um TEXTO SELECIONADO seguindo uma INSTRUÇÃO falada pelo usuário. "
+        "Exemplos de instrução: 'deixa mais formal', 'traduz para inglês', 'resume em 3 pontos', "
+        "'corrige a gramática', 'transforma em lista', 'responde esse e-mail dizendo que sim'. "
+        "Aplique a instrução ao texto e devolva SOMENTE o resultado final, pronto para substituir "
+        "a seleção — sem comentários, sem aspas, sem explicar o que fez. Mantenha o idioma do texto "
+        "original, a menos que a instrução peça tradução. Se a instrução for apenas um ditado comum "
+        "(a pessoa não se referiu ao texto), devolva o texto original seguido do ditado corrigido."
+    ),
     "sample_rate": 16000,
     "paste_mode": "clipboard",  # clipboard (ctrl+v) | type (digita char a char)
     "max_seconds": 300,
@@ -190,8 +208,9 @@ def load_config():
     # que o usuário fez nos modos existentes)
     try:
         nomes = {m.get("nome") for m in cfg.get("modes", [])}
+        apagados = set(cfg.get("modes_removed", []) or [])
         for m in DEFAULT_CONFIG.get("modes", []):
-            if m.get("nome") not in nomes:
+            if m.get("nome") not in nomes and m.get("nome") not in apagados:
                 cfg.setdefault("modes", []).append(dict(m))
                 log(f"modo novo de fábrica adicionado: {m.get('nome')}")
     except Exception as e:
@@ -255,6 +274,123 @@ def dictionary_guard(cfg, limit=400):
 def save_config(cfg):
     APP_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------- sincronização
+
+def sync_payload(cfg):
+    """Fatia do config que viaja entre PCs (sem chave de API, sem atalhos)."""
+    return {k: cfg.get(k) for k in SYNC_KEYS if k in cfg}
+
+
+def merge_sync(local, remoto):
+    """Mescla preferências vindas de outro PC com as deste.
+
+    Regra: dicionário = UNIÃO (nunca se perde termo adicionado em qualquer PC);
+    modos = união por nome, versão com 'atualizado_em' mais novo vence (sem o carimbo,
+    o remoto vence porque quem salvou por último o fez em outro PC);
+    campos simples = o mais novo pelo carimbo do payload.
+    """
+    out = dict(local)
+    if not remoto:
+        return out
+    # dicionário: união ordenada (local primeiro, depois novos do remoto), menos os
+    # termos apagados em qualquer PC (tombstones) — senão remover nunca "pega"
+    loc_terms = dictionary_terms({"dictionary": local.get("dictionary", [])})
+    rem_terms = dictionary_terms({"dictionary": remoto.get("dictionary", [])})
+    # tombstones: a lista de quem agiu por último vence (remover no PC A e re-adicionar
+    # no PC B são ações deliberadas; a mais recente é a verdade). União cega faria
+    # um termo re-adicionado morrer de novo; sem tombstone, remover nunca pegaria.
+    newer_remote = str(remoto.get("_atualizado_em", "")) > str(local.get("_atualizado_em", ""))
+    src = remoto if newer_remote else local
+    apagados = set(src.get("dictionary_removed", []) or [])
+    baixo = {t.lower() for t in loc_terms}
+    uniao = loc_terms + [t for t in rem_terms if t.lower() not in baixo]
+    out["dictionary"] = [t for t in uniao if t.lower() not in apagados]
+    out["dictionary_removed"] = sorted(apagados)
+    # modos: por nome, carimbo mais novo vence; tombstones de quem agiu por último
+    modos_apagados = set(src.get("modes_removed", []) or [])
+    by_name = {}
+    for m in list(local.get("modes", []) or []):
+        by_name[m.get("nome")] = m
+    for m in list(remoto.get("modes", []) or []):
+        cur = by_name.get(m.get("nome"))
+        if cur is None or str(m.get("atualizado_em", "")) >= str(cur.get("atualizado_em", "")):
+            by_name[m.get("nome")] = m
+    out["modes"] = [m for n, m in by_name.items() if n not in modos_apagados]
+    out["modes_removed"] = sorted(modos_apagados)
+    # campos simples: carimbo do payload decide
+    for k in SYNC_KEYS:
+        if k in ("dictionary", "dictionary_removed", "modes", "modes_removed"):
+            continue
+        if k in remoto and (newer_remote or k not in local):
+            out[k] = remoto[k]
+    return out
+
+
+class Sync:
+    """Sincroniza dicionário/modos/preferências via arquivo em repo PRIVADO no GitHub.
+
+    Mesmo mecanismo do Tarefa IA (Contents API). Credenciais em %APPDATA%\\DitadoIA\\sync.json,
+    que vem no zip de instalação (sync_config.json) e NUNCA entra no repo público.
+    """
+
+    def __init__(self):
+        self.cfg = None
+        try:
+            if SYNC_PATH.exists():
+                self.cfg = json.loads(SYNC_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            log(f"sync: erro lendo sync.json: {e}")
+
+    @property
+    def ativo(self):
+        return bool(self.cfg and self.cfg.get("github_token") and self.cfg.get("repo"))
+
+    def _url(self):
+        return f"https://api.github.com/repos/{self.cfg['repo']}/contents/{SYNC_FILE}"
+
+    def _headers(self):
+        return {"Authorization": f"token {self.cfg['github_token']}",
+                "Accept": "application/vnd.github+json"}
+
+    def pull(self):
+        """Retorna (payload_remoto, sha) ou (None, None)."""
+        if not self.ativo:
+            return None, None
+        try:
+            r = requests.get(self._url(), headers=self._headers(), timeout=20)
+            if r.status_code == 404:
+                return None, None
+            r.raise_for_status()
+            d = r.json()
+            data = json.loads(b64decode(d["content"]).decode("utf-8"))
+            return data, d.get("sha")
+        except Exception as e:
+            log(f"sync pull falhou: {e}")
+            return None, None
+
+    def push(self, cfg):
+        """Mescla com o remoto e publica. Retorna o config mesclado (ou None se falhou)."""
+        if not self.ativo:
+            return None
+        try:
+            remoto, sha = self.pull()
+            local = sync_payload(cfg)
+            local["_atualizado_em"] = cfg.get("_atualizado_em", "")
+            merged = merge_sync(local, remoto or {})
+            merged["_atualizado_em"] = datetime.now().isoformat(timespec="seconds")
+            body = json.dumps(merged, ensure_ascii=False, indent=2)
+            payload = {"message": f"ditado {datetime.now():%d/%m %H:%M}",
+                       "content": b64encode(body.encode("utf-8")).decode("ascii")}
+            if sha:
+                payload["sha"] = sha
+            r = requests.put(self._url(), headers=self._headers(), json=payload, timeout=20)
+            r.raise_for_status()
+            return merged
+        except Exception as e:
+            log(f"sync push falhou: {e}")
+            return None
 
 
 def append_history(entry):
@@ -385,6 +521,37 @@ class Pipeline:
         for tag in ("<transcricao>", "</transcricao>"):
             out = out.replace(tag, "").strip()
         return out or raw_text
+
+    def edit_selection(self, selected, instruction):
+        """Comando por voz sobre texto selecionado: aplica a instrução falada ao texto.
+
+        Diferente do cleanup, aqui a fala É uma instrução a executar (sobre o texto),
+        então não usamos o guard anti-resposta — mas delimitamos texto e instrução
+        em tags para o modelo não confundir um com o outro.
+        """
+        p = PROVIDERS[self.cfg["provider"]]
+        system = (self.cfg.get("selection_prompt") or DEFAULT_CONFIG["selection_prompt"]) \
+            + dictionary_guard(self.cfg)
+        user = (
+            "<texto_selecionado>\n" + selected + "\n</texto_selecionado>\n\n"
+            "<instrucao_falada>\n" + instruction + "\n</instrucao_falada>\n\n"
+            "Devolva apenas o texto resultante."
+        )
+        r = requests.post(
+            p["llm_url"],
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={"model": p["llm_model"], "temperature": 0.3,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}]},
+            timeout=60,
+        )
+        update_usage(r.headers)
+        r.raise_for_status()
+        out = r.json()["choices"][0]["message"]["content"].strip()
+        for tag in ("<texto_selecionado>", "</texto_selecionado>",
+                    "<instrucao_falada>", "</instrucao_falada>"):
+            out = out.replace(tag, "").strip()
+        return out
 
 
 # ---------------------------------------------------------------- gravador
@@ -859,17 +1026,78 @@ class DitadoApp:
         if self.overlay:
             self.overlay.hide()
 
+    def _grab_selection(self):
+        """Captura o texto selecionado no app em foco (ou "" se não há seleção).
+
+        Técnica: guarda o clipboard, envia Ctrl+C, lê, restaura. Como o usuário ainda
+        segura Alt (do Alt+V), soltamos o Alt virtualmente antes do Ctrl+C — senão o
+        app receberia Ctrl+Alt+C. Sentinela: clipboard recebe um marcador antes do
+        Ctrl+C; se continuar com o marcador, não havia seleção (apps sem seleção
+        ignoram o Ctrl+C e o clipboard fica como estava).
+        """
+        if not self.cfg.get("selection_command", True):
+            return ""
+        marcador = "\u200b__DITADO_IA_SEM_SELECAO__\u200b"
+        antigo = None
+        try:
+            try:
+                antigo = pyperclip.paste()
+            except Exception:
+                antigo = None
+            pyperclip.copy(marcador)
+            time.sleep(0.03)
+            for k in ("alt", "ctrl", "shift"):
+                try:
+                    keyboard.release(k)
+                except Exception:
+                    pass
+            keyboard.send("ctrl+c")
+            # apps lentos (Word, navegador) levam um tempinho para publicar a cópia
+            sel = marcador
+            for _ in range(8):
+                time.sleep(0.04)
+                try:
+                    sel = pyperclip.paste()
+                except Exception:
+                    sel = marcador
+                if sel != marcador:
+                    break
+            if sel == marcador or not isinstance(sel, str):
+                sel = ""
+            return sel.strip()
+        except Exception as e:
+            log(f"seleção: captura falhou: {e}")
+            return ""
+        finally:
+            # devolve o clipboard do usuário (melhor-esforço)
+            try:
+                if antigo is not None and antigo != marcador:
+                    pyperclip.copy(antigo)
+                elif antigo is None:
+                    pyperclip.copy("")
+            except Exception:
+                pass
+
     def _dictate(self, mode=None):
         self.busy = True
         toggle_mode = self.cfg.get("mode", "segurar") == "toggle"
         mode_name = (mode or {}).get("nome")
         mode_prompt = (mode or {}).get("prompt")
         mode_hotkey = (mode or {}).get("hotkey") or self.cfg["hotkey"]
+        selecao = ""
         try:
+            # comando sobre seleção só no atalho padrão (modos têm instrução própria)
+            if mode is None:
+                selecao = self._grab_selection()
+                if selecao:
+                    log(f"seleção capturada ({len(selecao)} chars) — modo comando")
             beep(880, 100)
             self._cancel_requested = False
             self._send_requested = False
-            label = f"{mode_name} — fale…" if mode_name else "Fale…"
+            if selecao:
+                label = "Diga o que fazer com o texto selecionado…"
+            else:
+                label = f"{mode_name} — fale…" if mode_name else "Fale…"
             hint = ("" if not toggle_mode else f"  ({mode_hotkey.upper()} para parar)")
             if self.overlay and self.cfg.get("show_overlay", True):
                 self.overlay.set_callbacks(
@@ -958,7 +1186,8 @@ class DitadoApp:
                 return
 
             if self.overlay and self.cfg.get("show_overlay", True):
-                self.overlay.set_processing("Transcrevendo e corrigindo…")
+                self.overlay.set_processing(
+                    "Aplicando ao texto selecionado…" if selecao else "Transcrevendo e corrigindo…")
             wav = wav_bytes(audio, self.cfg["sample_rate"])
             pipe = Pipeline(self.cfg)
             try:
@@ -973,12 +1202,29 @@ class DitadoApp:
             if self._cancel_requested:
                 log("ditado cancelado pelo botão ✕ (durante a transcrição)")
                 return
-            try:
-                final = pipe.cleanup(raw, prompt_override=mode_prompt)
-            except Exception as e:
-                body = getattr(getattr(e, "response", None), "text", "")
-                log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
-                final = raw  # transcrição ok; entrega sem correção
+            if selecao and raw:
+                # comando por voz sobre a seleção: o resultado SUBSTITUI o texto
+                # selecionado (o Ctrl+V do paste_text cola por cima da seleção)
+                try:
+                    final = pipe.edit_selection(selecao, raw)
+                except Exception as e:
+                    body = getattr(getattr(e, "response", None), "text", "")
+                    log(f"erro API (comando sobre seleção): {e} | {body[:300]}")
+                    beep(300, 300)
+                    self.notify("⚠️ Não consegui aplicar o comando ao texto selecionado. "
+                                "O texto original foi mantido.")
+                    return
+                if not final:
+                    log("comando sobre seleção: IA devolveu vazio — mantendo original")
+                    self.notify("⚠️ A IA não devolveu resultado. Texto original mantido.")
+                    return
+            else:
+                try:
+                    final = pipe.cleanup(raw, prompt_override=mode_prompt)
+                except Exception as e:
+                    body = getattr(getattr(e, "response", None), "text", "")
+                    log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
+                    final = raw  # transcrição ok; entrega sem correção
             if self._cancel_requested:
                 log("ditado cancelado pelo botão ✕ (durante a correção)")
                 return
@@ -991,7 +1237,8 @@ class DitadoApp:
                     "ts": datetime.now().isoformat(timespec="seconds"),
                     "bruto": raw,
                     "final": final,
-                    "modo": mode_name or "padrão",
+                    "modo": "comando sobre seleção" if selecao else (mode_name or "padrão"),
+                    **({"selecao": selecao[:500]} if selecao else {}),
                 })
             else:
                 beep(300, 300)
@@ -1320,7 +1567,7 @@ class DitadoApp:
 
         win = tk.Tk()
         win.title(f"{APP_NAME} — Configurações")
-        win.geometry("460x420")
+        win.geometry("520x480")
         win.attributes("-topmost", True)
         pad = {"padx": 12, "pady": 6}
 
@@ -1381,6 +1628,10 @@ class DitadoApp:
         ttk.Checkbutton(frm, text="Bloquear teclas do atalho (evita 'vvv' em alguns apps)",
                         variable=sup_var).grid(row=10, column=0, columnspan=3, sticky="w")
 
+        selcmd_var = tk.BooleanVar(master=win, value=self.cfg.get("selection_command", True))
+        ttk.Checkbutton(frm, text="Comando por voz sobre texto selecionado (selecione, segure o atalho, fale)",
+                        variable=selcmd_var).grid(row=12, column=0, columnspan=3, sticky="w")
+
         ttk.Label(frm, text="Nível da correção:").grid(row=5, column=0, sticky="w")
         lvl_var = tk.StringVar(master=win, value=self.cfg.get("cleanup_level", "normal"))
         ttk.Combobox(frm, textvariable=lvl_var, values=["leve", "normal", "formal"],
@@ -1410,7 +1661,7 @@ class DitadoApp:
 
         ttk.Button(frm, text="🔄 Verificar atualizações",
                    command=lambda: self.do_update_check(silent=False)).grid(
-            row=12, column=0, columnspan=3, pady=(4, 0))
+            row=15, column=0, columnspan=3, pady=(4, 0))
 
         def salvar():
             self.cfg["hotkey"] = hot_var.get().strip() or "alt+v"
@@ -1426,13 +1677,14 @@ class DitadoApp:
             self.cfg["cleanup_level"] = lvl_var.get() or self.cfg.get("cleanup_level", "normal")
             self.cfg["language"] = lang_var.get() or "auto"
             self.cfg["paste_mode"] = paste_var.get() or "clipboard"
-            save_config(self.cfg)
+            self.cfg["selection_command"] = selcmd_var.get()
+            self._sync_bg()
             self.register_hotkey()
             win.destroy()
             self.notify(f"Salvo! Atalho atual: {self.cfg['hotkey']}")
 
         ttk.Button(frm, text="Salvar", command=salvar).grid(
-            row=11, column=0, columnspan=3, pady=16)
+            row=14, column=0, columnspan=3, pady=16)
 
         win.mainloop()
 
@@ -1490,7 +1742,12 @@ class DitadoApp:
             baixo = {t.lower() for t in atual}
             add = [t for t in novos if t.lower() not in baixo]
             self.cfg["dictionary"] = atual + add
-            save_config(self.cfg)
+            # re-adicionar um termo apagado tira ele da lista de apagados
+            if add:
+                apagados = set(self.cfg.get("dictionary_removed", []) or [])
+                apagados -= {t.lower() for t in add}
+                self.cfg["dictionary_removed"] = sorted(apagados)
+            self._sync_bg()
             novo_var.set("")
             refresh()
             if add:
@@ -1501,11 +1758,14 @@ class DitadoApp:
             if not sel:
                 return
             terms = dictionary_terms(self.cfg)
-            for i in sorted(sel, reverse=True):
-                if 0 <= i < len(terms):
-                    terms.pop(i)
-            self.cfg["dictionary"] = terms
-            save_config(self.cfg)
+            removidos = [terms[i] for i in sel if 0 <= i < len(terms)]
+            self.cfg["dictionary"] = [t for i, t in enumerate(terms) if i not in sel]
+            # termos removidos vão para uma lista de "apagados" para o sync não
+            # trazê-los de volta do outro PC (união cega ressuscitaria)
+            apagados = set(self.cfg.get("dictionary_removed", []) or [])
+            apagados.update(t.lower() for t in removidos)
+            self.cfg["dictionary_removed"] = sorted(apagados)
+            self._sync_bg()
             refresh()
 
         def importar():
@@ -1528,8 +1788,11 @@ class DitadoApp:
 
         def limpar():
             if messagebox.askyesno(APP_NAME, "Apagar TODOS os termos do dicionário?", parent=win):
+                apagados = set(self.cfg.get("dictionary_removed", []) or [])
+                apagados.update(t.lower() for t in dictionary_terms(self.cfg))
+                self.cfg["dictionary_removed"] = sorted(apagados)
                 self.cfg["dictionary"] = []
-                save_config(self.cfg)
+                self._sync_bg()
                 refresh()
 
         ent.bind("<Return>", adicionar)
@@ -1619,6 +1882,7 @@ class DitadoApp:
                 "hotkey": hot_var.get().strip().lower(),
                 "ativo": ativo_var.get(),
                 "prompt": prompt_txt.get("1.0", "end").strip(),
+                "atualizado_em": datetime.now().isoformat(timespec="seconds"),
             }
             modes = self.cfg.setdefault("modes", [])
             sel = tree.selection()
@@ -1626,7 +1890,10 @@ class DitadoApp:
                 modes[tree.index(sel[0])] = novo
             else:    # criar novo
                 modes.append(novo)
-            save_config(self.cfg)
+            # recriar um modo apagado tira ele dos apagados
+            self.cfg["modes_removed"] = sorted(
+                a for a in (self.cfg.get("modes_removed", []) or []) if a != nome)
+            self._sync_bg()
             self.register_hotkey()
             refresh()
             self.notify(f"Modo '{nome}' salvo ({novo['hotkey'] or 'sem atalho'}).")
@@ -1637,7 +1904,10 @@ class DitadoApp:
                 return
             idx = tree.index(sel[0])
             m = self.cfg["modes"].pop(idx)
-            save_config(self.cfg)
+            apagados = set(self.cfg.get("modes_removed", []) or [])
+            apagados.add(m.get("nome", ""))
+            self.cfg["modes_removed"] = sorted(a for a in apagados if a)
+            self._sync_bg()
             self.register_hotkey()
             refresh()
             self.notify(f"Modo '{m.get('nome')}' removido.")
@@ -1688,6 +1958,69 @@ class DitadoApp:
         ttk.Label(win, text="Dica: duplo clique copia o texto para a área de transferência.").pack(pady=(0, 8))
         win.mainloop()
 
+    # ---------- sincronização entre PCs
+    def _bootstrap_sync_file(self):
+        """Garante o sync.json no APPDATA. Fontes, em ordem:
+        1) sync_config.json na pasta do app (vem no zip de instalação nova);
+        2) o sync.json do Tarefa IA (%APPDATA%\\TarefaIA) — mesmo token e repo
+           privado da família; é o caminho para quem atualizou pelo GitHub (o
+           repo público NUNCA carrega o token)."""
+        try:
+            if SYNC_PATH.exists():
+                return
+            candidatos = [
+                Path(__file__).resolve().parent / "sync_config.json",
+                APP_DIR.parent / "TarefaIA" / "sync.json",
+            ]
+            for origem in candidatos:
+                if origem.exists():
+                    try:
+                        d = json.loads(origem.read_text(encoding="utf-8"))
+                        if not (d.get("github_token") and d.get("repo")):
+                            continue
+                    except Exception:
+                        continue
+                    APP_DIR.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(str(origem), str(SYNC_PATH))
+                    log(f"sync: credenciais instaladas a partir de {origem.parent.name}")
+                    return
+        except Exception as e:
+            log(f"sync bootstrap: {e}")
+
+    def sync_now(self, silent=True):
+        """Mescla com a nuvem (dicionário união, modos por nome, prefs mais novas) e aplica."""
+        sync = Sync()
+        if not sync.ativo:
+            if not silent:
+                self.notify("Sincronização não configurada neste PC (falta sync.json).")
+            return False
+        merged = sync.push(self.cfg)
+        if merged is None:
+            if not silent:
+                self.notify("⚠️ Sincronização falhou (sem internet ou token inválido). Veja app.log.")
+            return False
+        antes_dic = len(dictionary_terms(self.cfg))
+        antes_modos = len(self.cfg.get("modes", []))
+        for k in SYNC_KEYS:
+            if k in merged:
+                self.cfg[k] = merged[k]
+        self.cfg["_atualizado_em"] = merged.get("_atualizado_em", "")
+        save_config(self.cfg)
+        self.register_hotkey()  # modos podem ter mudado de atalho
+        novos_dic = len(dictionary_terms(self.cfg)) - antes_dic
+        novos_modos = len(self.cfg.get("modes", [])) - antes_modos
+        log(f"sync ok: +{novos_dic} termos, +{novos_modos} modos")
+        if not silent:
+            self.notify(f"✅ Sincronizado! {len(dictionary_terms(self.cfg))} termos no dicionário, "
+                        f"{len(self.cfg.get('modes', []))} modos.")
+        return True
+
+    def _sync_bg(self):
+        """Dispara um sync em segundo plano (depois de salvar algo que viaja)."""
+        self.cfg["_atualizado_em"] = datetime.now().isoformat(timespec="seconds")
+        save_config(self.cfg)
+        threading.Thread(target=self.sync_now, kwargs={"silent": True}, daemon=True).start()
+
     # ---------- bandeja
     def _make_icon_image(self):
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -1700,6 +2033,7 @@ class DitadoApp:
 
     def run(self):
         APP_DIR.mkdir(parents=True, exist_ok=True)
+        self._bootstrap_sync_file()
         self.overlay = Overlay()  # indicador visual flutuante
         if not self.cfg.get("api_key"):
             # primeira execução: abre configurações
@@ -1709,6 +2043,16 @@ class DitadoApp:
 
         # checagem silenciosa de atualização ao iniciar (só avisa se houver nova)
         threading.Timer(8.0, lambda: self.do_update_check(silent=True)).start()
+        # sincronização inicial (puxa o que o outro PC salvou) + a cada 30 min
+        def _sync_loop():
+            time.sleep(15)
+            while True:
+                try:
+                    self.sync_now(silent=True)
+                except Exception as e:
+                    log(f"sync loop: {e}")
+                time.sleep(1800)
+        threading.Thread(target=_sync_loop, daemon=True).start()
 
         # recuperação pós bloqueio/suspensão: canal oficial + reserva
         threading.Thread(target=self._session_listener, daemon=True).start()
@@ -1722,6 +2066,9 @@ class DitadoApp:
             pystray.MenuItem("Histórico", lambda: self.open_history()),
             pystray.MenuItem("Modos de ditado", lambda: self.open_modes()),
             pystray.MenuItem("Dicionário pessoal", lambda: self.open_dictionary()),
+            pystray.MenuItem("Sincronizar agora (casa ↔ escritório)",
+                             lambda: threading.Thread(target=self.sync_now,
+                                                      kwargs={"silent": False}, daemon=True).start()),
             pystray.MenuItem("Transcrever pendentes", lambda: self.process_pending()),
             pystray.MenuItem("Configurações", lambda: self.open_settings()),
             pystray.MenuItem("Verificar atualizações",

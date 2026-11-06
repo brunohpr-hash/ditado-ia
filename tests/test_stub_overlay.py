@@ -52,10 +52,13 @@ class FakeOverlay:
 
 mod.keyboard.is_pressed = lambda k: True  # usuário segura a tecla "para sempre"
 mod.keyboard.send = lambda *a, **k: None
+mod.keyboard.release = lambda *a, **k: None
 mod.pyperclip.copy = lambda t: None; mod.pyperclip.paste = lambda: pasted[-1] if pasted else ""
 pasted = []
 _copy = mod.pyperclip.copy
 mod.pyperclip.copy = lambda t: pasted.append(t)
+# sem seleção nestes cenários (o teste da seleção fica em test_stub_v170)
+mod.DitadoApp._grab_selection = lambda self: ""
 mod.wav_bytes = lambda frames, sr: io.BytesIO(b"x")
 mod.beep = lambda *a, **k: None
 
