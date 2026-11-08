@@ -1,4 +1,4 @@
 {
-  "version": "1.7.0",
-  "changelog": "(1) SINCRONIZAÇÃO CASA ↔ ESCRITÓRIO — dicionário pessoal, modos de ditado e preferências (idioma, nível de correção) agora viajam entre os seus PCs automaticamente: ao abrir o app, a cada 30 min e sempre que você salva algo. Termos adicionados em um PC aparecem no outro; termos ou modos apagados não voltam. Novo item na bandeja: 'Sincronizar agora'. A chave de API e os atalhos continuam por máquina. Se o Tarefa IA já estiver instalado, as credenciais são reaproveitadas sozinhas. (2) COMANDO POR VOZ SOBRE TEXTO SELECIONADO — selecione um trecho em qualquer app, segure Alt+V e diga o que fazer: 'deixa mais formal', 'traduz para inglês', 'resume em 3 pontos', 'corrige a gramática', 'transforma em lista'. O resultado substitui a seleção. Sem seleção, funciona como ditado normal. Pode desligar nas Configurações."
+  "version": "1.7.1",
+  "changelog": "Compatível com o novo limite da Groq (1.000 tokens de saída/minuto no plano grátis): respostas da IA limitadas a 900 tokens — corrige o erro 429 'Request too large' que deixava o app sem resposta."
 }

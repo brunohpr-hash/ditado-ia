@@ -31,7 +31,8 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
+MAX_OUT_TOKENS = 900  # Groq free: OTPM 1000/min; acima disso 429 "Request too large"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DitadoIA"
@@ -507,6 +508,7 @@ class Pipeline:
             json={
                 "model": p["llm_model"],
                 "temperature": 0.2,
+                "max_tokens": MAX_OUT_TOKENS,
                 "messages": [
                     {"role": "system", "content": prompt + dictionary_guard(self.cfg) + guard},
                     {"role": "user", "content": wrapped},
@@ -540,7 +542,7 @@ class Pipeline:
         r = requests.post(
             p["llm_url"],
             headers={**self._headers(), "Content-Type": "application/json"},
-            json={"model": p["llm_model"], "temperature": 0.3,
+            json={"model": p["llm_model"], "temperature": 0.3, "max_tokens": MAX_OUT_TOKENS,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": user}]},
             timeout=60,
