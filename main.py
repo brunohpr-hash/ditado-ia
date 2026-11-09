@@ -31,7 +31,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 MAX_OUT_TOKENS = 900  # Groq free: OTPM 1000/min; acima disso 429 "Request too large"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
@@ -48,7 +48,7 @@ SYNC_KEYS = ("dictionary", "dictionary_removed", "modes", "modes_removed", "lang
              "cleanup_level", "selection_command", "selection_prompt")
 
 DEFAULT_CONFIG = {
-    "hotkey": "alt+v",
+    "hotkey": "ctrl+shift+d",  # padrão da suíte: Ctrl+Shift+primeira letra
     "mode": "segurar",  # segurar (fala enquanto pressiona) | toggle (aperta 1x liga, 1x desliga)
     "show_overlay": True,  # indicador visual no centro inferior da tela
     "live_preview": True,  # texto ao vivo na caixinha enquanto fala

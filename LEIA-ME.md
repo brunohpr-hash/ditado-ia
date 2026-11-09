@@ -5,7 +5,7 @@ lugar do Windows e o texto aparece corrigido onde o cursor estiver.
 
 ## Como funciona
 
-1. **Segure `Alt+V`** (ou o atalho que você configurar)
+1. **Segure `Ctrl+Shift+D`** (ou o atalho que você configurar)
 2. **Fale** — português, inglês, espanhol, misturado... ele detecta sozinho
 3. **Solte a tecla** — em 1-2 segundos o texto aparece digitado, já corrigido:
    sem "ééé", sem muletas, sem resmungos, com gramática e pontuação certas
@@ -42,7 +42,7 @@ trabalho até a barra de tarefas — ou clica nele com o botão direito →
 
 | Recurso | Descrição |
 |---|---|
-| 🎹 Atalho configurável | Padrão Alt+V; mude em Configurações → "Detectar" |
+| 🎹 Atalho configurável | Padrão Ctrl+Shift+D; mude em Configurações (ou cole a combinação no campo) |
 | 🤖 Correção por IA | 3 níveis: leve / normal / formal |
 | 🌍 Idioma declarado | Português por padrão (mais preciso); 'auto' detecta sozinho, até misturado |
 | 📖 Dicionário pessoal | Nomes de clientes, siglas (DCTFWeb, PGDAS…) e termos técnicos escritos sempre certos |
