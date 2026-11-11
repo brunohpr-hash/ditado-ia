@@ -7,6 +7,7 @@ onde o cursor estiver. Funciona em qualquer aplicativo do Windows.
 Pipeline: microfone -> Whisper (Groq/OpenAI) -> correção por IA -> colar texto.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -31,7 +32,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 MAX_OUT_TOKENS = 900  # Groq free: OTPM 1000/min; acima disso 429 "Request too large"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
@@ -46,6 +47,110 @@ SYNC_FILE = "ditado.json"  # arquivo dentro do repo privado de dados
 # chave de API, atalhos de teclado, modo de colagem, overlay)
 SYNC_KEYS = ("dictionary", "dictionary_removed", "modes", "modes_removed", "language", "cleanup",
              "cleanup_level", "selection_command", "selection_prompt")
+
+# >>> honorarios (bloco gerado; não editar à mão)
+HONORARIOS_NOME = "Cobrança de honorários"
+HONORARIOS_HOTKEY = "ctrl+shift+h"  # padrão da suíte: Ctrl+Shift+letra
+# o modelo gasta o teto de saída "pensando"; este modo escreve mensagens longas
+HONORARIOS_ESFORCO = "low"
+# instruções/atalhos de fábrica ANTIGOS (sha256 do texto com espaços normalizados):
+# config salvo que ainda tiver um destes é atualizado; o que o usuário editou, não.
+HONORARIOS_PROMPTS_ANTIGOS = {"e21f366dcde1599fd692d0cf2d130e337d7ae59788c2d99f44d23627b89eba00"}
+HONORARIOS_HOTKEYS_ANTIGOS = {"alt+h"}
+HONORARIOS_PROMPT = (
+    "Você transforma ditados por voz em mensagens de cobrança de honorários contábeis, em "
+    "português do Brasil, prontas para enviar no WhatsApp. A mensagem traz TUDO o que a pessoa "
+    "falou, em texto bem escrito, com os dados dos honorários destacados em blocos.\n"
+    "ORDEM DA MENSAGEM:\n"
+    "1. Saudação e abertura: o cumprimento, quem está falando e a explicação COMPLETA do motivo "
+    "do contato, com os detalhes que a pessoa deu (como, quando e por quem a pendência foi "
+    "percebida), sem encurtar. A abertura diz QUE há honorário(s) em aberto e por que a pessoa "
+    "está avisando, mas NÃO traz valor nem data de vencimento: esses dados saem da frase e vão só"
+    " para os blocos (ex.: a fala 'tô te chamando porque no fechamento de ontem ficou pendente o "
+    "honorário de agosto, de 1.250 reais, e o de setembro, que venceu dia 10' vira a abertura "
+    "'Estou chamando porque, no fechamento de ontem, ficaram pendentes os honorários de agosto e "
+    "setembro.' — o motivo fica inteiro, só os números saem). Chame o cliente do jeito que ela "
+    "chamou: 'seu Leandro' vira 'Sr. Leandro', 'dona Márcia' vira 'Sra. Márcia'; se ela disse só "
+    "o nome ('Paulo'), escreva só o nome, sem acrescentar tratamento. Somente quando a pessoa foi"
+    " direto aos dados, sem explicar nada, use uma frase breve informando que há honorário(s) "
+    "pendente(s).\n"
+    "2. Blocos dos honorários, CADA pendência em BLOCO SEPARADO, com estes emojis:\n"
+    "📄 Competência: <MM/AAAA>\n"
+    "📅 Vencimento: <DD/MM/AAAA>\n"
+    "💰 Valor: R$ <valor com centavos, ex.: 1.250,00>\n"
+    "As três linhas de um bloco ficam juntas; deixe uma linha em branco antes do primeiro bloco, "
+    "entre um bloco e outro e depois do último. Os blocos são SEMPRE obrigatórios, mesmo com uma "
+    "única pendência e mesmo em ditado curto. Competência, vencimento e valor aparecem SOMENTE "
+    "nos blocos: não repita esses dados em texto corrido.\n"
+    "3. Se houver mais de uma pendência, logo após os blocos: 💵 Total: R$ <soma dos valores> — "
+    "some você mesmo com atenção. Com uma única pendência, não escreva Total.\n"
+    "4. TODO o restante da fala, na ordem em que foi dito, um parágrafo curto por assunto: "
+    "explicações, ressalvas, formas de pagamento, pedidos, avisos e lembretes. O PRIMEIRO "
+    "parágrafo depois dos blocos é o que a pessoa disse logo após citar os honorários; quando for"
+    " um comentário de compreensão ou para tranquilizar o cliente, ele é obrigatório e nunca pode"
+    " ser descartado.\n"
+    "5. Pedido final e despedida: se a pessoa já pediu o pagamento, um retorno ou a confirmação "
+    "(com ou sem prazo), use o pedido dela, com o prazo que ela ditou; só se ela não pediu nada, "
+    "termine pedindo a gentileza da confirmação. Use a despedida que ela ditou.\n"
+    "NÃO RESUMA (muito importante): os blocos organizam os números; eles NÃO substituem o resto "
+    "da fala. Cada frase da transcrição tem de ter a sua correspondente na mensagem, inclusive as"
+    " frases de gentileza, de compreensão e de contexto, que parecem dispensáveis mas fazem parte"
+    " do recado. Antes de responder, conte os assuntos da fala e confira se cada um deles virou "
+    "um trecho da mensagem, e confira também que nenhum valor ou data de vencimento dos "
+    "honorários aparece fora dos blocos. Se a fala foi longa, a mensagem é longa. Se a pessoa só "
+    "ditou os dados dos honorários, a mensagem fica curta: saudação, uma frase breve sem números "
+    "(ex.: 'Segue o honorário pendente:'), bloco(s) e pedido de confirmação, sem enchimento.\n"
+    "POLIMENTO: o texto final é de quem escreve bem, não de quem fala. Remova muletas e marcas de"
+    " oralidade ('né', 'então', 'tipo', 'aí'), hesitações e repetições; corrija gramática e "
+    "pontuação; prefira 'identificamos' a 'a gente identificou'. Polir muda a forma, nunca o "
+    "conteúdo.\n"
+    "FIDELIDADE: use somente o que foi falado. NÃO crie frases que afirmem fatos não ditos (ex.: "
+    "'conforme conversamos', 'como combinado'). NÃO invente competência, data, valor ou prazo, "
+    "nem complete o ano que não foi dito: mês sem ano fica só o mês por extenso (ex.: 'agosto'); "
+    "dia e mês sem ano ficam 'DD/MM' (ex.: '10/10'). Use 'a confirmar' somente no campo que a "
+    "pessoa realmente não mencionou. NÃO adicione juros, multas, ameaças, cumprimentos ('tudo "
+    "bem?'), agradecimentos ('obrigado') nem cortesias que não foram ditados. Tom cordial e "
+    "profissional, nunca agressivo. NÃO adicione assinatura a menos que a pessoa dite.\n"
+    "EXEMPLO DE FORMATO (dados fictícios; nunca copie nada dele para a mensagem):\n"
+    "Fala: oi dona Regina, bom dia, tudo bem com a senhora? aqui é a Paula do escritório. é, eu "
+    "tô passando porque ontem eu fiz a conferência do nosso controle e apareceram duas "
+    "mensalidades em aberto, a de março de 2025 que venceu dia 10 de abril de 2025, de 300 reais,"
+    " e a de abril de 2025, vencimento 10 de maio de 2025, de 320 reais. eu imagino que foi por "
+    "causa da mudança da loja, né, que deve ter dado uma correria danada, então não se preocupa. "
+    "a senhora pode pagar por transferência ou eu mando o link do cartão, como ficar melhor. só "
+    "lembrando que mês que vem tem a renovação do alvará. me avisa até quarta, por favor. "
+    "obrigada, um beijo\n"
+    "Mensagem:\n"
+    "Bom dia, Sra. Regina, tudo bem com a senhora? Aqui é a Paula, do escritório.\n"
+    "\n"
+    "Estou passando porque ontem fiz a conferência do nosso controle e apareceram duas "
+    "mensalidades em aberto.\n"
+    "\n"
+    "📄 Competência: 03/2025\n"
+    "📅 Vencimento: 10/04/2025\n"
+    "💰 Valor: R$ 300,00\n"
+    "\n"
+    "📄 Competência: 04/2025\n"
+    "📅 Vencimento: 10/05/2025\n"
+    "💰 Valor: R$ 320,00\n"
+    "\n"
+    "💵 Total: R$ 620,00\n"
+    "\n"
+    "Imagino que tenha sido por causa da mudança da loja, que deve ter gerado bastante correria, "
+    "então não se preocupe.\n"
+    "\n"
+    "A senhora pode pagar por transferência ou, se preferir, eu envio o link do cartão, como "
+    "ficar melhor.\n"
+    "\n"
+    "Só lembrando que no mês que vem há a renovação do alvará.\n"
+    "\n"
+    "Peço que me avise até quarta, por favor.\n"
+    "\n"
+    "Obrigada, um beijo.\n"
+    "(fim do exemplo)\n"
+    "Responda SOMENTE com a mensagem final, sem comentários."
+)
+# <<< honorarios
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+shift+d",  # padrão da suíte: Ctrl+Shift+primeira letra
@@ -103,33 +208,11 @@ DEFAULT_CONFIG = {
             ),
         },
         {
-            "nome": "Cobrança de honorários",
-            "hotkey": "alt+h",
+            "nome": HONORARIOS_NOME,
+            "hotkey": HONORARIOS_HOTKEY,
             "ativo": True,
-            "prompt": (
-                "Você transforma ditados por voz em mensagens de cobrança de honorários "
-                "contábeis, em português do Brasil, prontas para enviar no WhatsApp. "
-                "Remova muletas e hesitações; corrija gramática e pontuação. "
-                "ESTRUTURA OBRIGATÓRIA da mensagem:\n"
-                "1. Saudação cordial (use o nome do cliente se for dito).\n"
-                "2. Uma frase breve informando que há honorário(s) pendente(s).\n"
-                "3. CADA pendência em BLOCO SEPARADO, neste formato (uma linha por campo, "
-                "com estes emojis):\n"
-                "📄 Competência: <mês/ano>\n"
-                "📅 Vencimento: <data>\n"
-                "💰 Valor: R$ <valor>\n"
-                "(linha em branco entre um bloco e outro)\n"
-                "4. Se houver mais de uma pendência, após os blocos inclua: "
-                "💵 Total: R$ <soma dos valores> — some você mesmo com atenção.\n"
-                "5. Fechamento educado pedindo o pagamento/confirmação (use o prazo que "
-                "a pessoa ditar, ex.: 'ainda hoje', 'até sexta'; se não ditar prazo, "
-                "peça apenas a gentileza da confirmação).\n"
-                "REGRAS: NÃO invente competência, data, valor ou prazo que não foram "
-                "ditos — se faltar um campo, escreva 'a confirmar'. NÃO adicione juros, "
-                "multas ou ameaças que não foram ditados. Tom sempre cordial e "
-                "profissional, nunca agressivo. NÃO adicione assinatura a menos que "
-                "a pessoa dite. Responda SOMENTE com a mensagem final, sem comentários."
-            ),
+            "esforco": HONORARIOS_ESFORCO,
+            "prompt": HONORARIOS_PROMPT,
         },
     ],
 }
@@ -140,6 +223,9 @@ PROVIDERS = {
         "stt_model": "whisper-large-v3",
         "llm_url": "https://api.groq.com/openai/v1/chat/completions",
         "llm_model": "openai/gpt-oss-120b",
+        # modelo que "pensa" antes de responder: aceita reasoning_effort. O raciocínio
+        # consome o mesmo teto de saída (MAX_OUT_TOKENS) que o texto final.
+        "llm_reasoning": True,
     },
     "openai": {
         "stt_url": "https://api.openai.com/v1/audio/transcriptions",
@@ -198,6 +284,48 @@ def log(msg):
         pass
 
 
+def migrate_honorarios(cfg):
+    """Atualiza o modo 'Cobrança de honorários' já salvo no PC (v1.7.5).
+
+    O config salvo guarda a instrução e o atalho do modo, então só trocar o padrão de
+    fábrica não muda nada para quem já usa. Regra: troca a instrução apenas se ela ainda
+    for uma versão de fábrica antiga (se o usuário editou, fica como está) e troca o atalho
+    apenas se ainda for o de fábrica antigo e o novo estiver livre. Carimba 'atualizado_em'
+    para a mudança vencer a cópia antiga na sincronização. Retorna True se alterou algo.
+    """
+    modos = cfg.get("modes", []) or []
+    em_uso = {str(cfg.get("hotkey", "")).strip().lower()} | {
+        str(m.get("hotkey", "")).strip().lower() for m in modos if m.get("nome") != HONORARIOS_NOME}
+    mudou = False
+    for m in modos:
+        if m.get("nome") != HONORARIOS_NOME:
+            continue
+        alterado = False
+        texto = " ".join(str(m.get("prompt", "")).split())
+        if hashlib.sha256(texto.encode("utf-8")).hexdigest() in HONORARIOS_PROMPTS_ANTIGOS:
+            m["prompt"] = HONORARIOS_PROMPT
+            alterado = True
+            log("modo honorários: instrução de fábrica atualizada (texto completo + blocos)")
+        if m.get("prompt") == HONORARIOS_PROMPT and m.get("esforco") != HONORARIOS_ESFORCO:
+            m["esforco"] = HONORARIOS_ESFORCO
+            alterado = True
+        if str(m.get("hotkey", "")).strip().lower() in HONORARIOS_HOTKEYS_ANTIGOS:
+            if HONORARIOS_HOTKEY in em_uso:
+                log(f"modo honorários: atalho mantido ({m.get('hotkey')}) — "
+                    f"{HONORARIOS_HOTKEY} já está em uso neste PC")
+            else:
+                log(f"modo honorários: atalho {m.get('hotkey')} -> {HONORARIOS_HOTKEY}")
+                m["hotkey"] = HONORARIOS_HOTKEY
+                alterado = True
+        if alterado:
+            m["atualizado_em"] = datetime.now().isoformat(timespec="seconds")
+            mudou = True
+    if mudou:
+        # a mudança precisa vencer a cópia antiga que está na nuvem
+        cfg["_atualizado_em"] = datetime.now().isoformat(timespec="seconds")
+    return mudou
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     try:
@@ -217,6 +345,11 @@ def load_config():
                 log(f"modo novo de fábrica adicionado: {m.get('nome')}")
     except Exception as e:
         log(f"mescla de modos falhou: {e}")
+    try:
+        if migrate_honorarios(cfg):
+            save_config(cfg)
+    except Exception as e:
+        log(f"migração do modo honorários falhou: {e}")
     # v1.6.0: idioma declarado. 'auto' deixa o Whisper adivinhar a cada ditado e
     # erra mais em nomes/siglas; migra UMA vez para pt (reversível nas Configurações).
     if cfg.get("language") in ("auto", "", None) and not cfg.get("_lang_migrated"):
@@ -480,7 +613,9 @@ class Pipeline:
         r.raise_for_status()
         return (r.json().get("text") or "").strip()
 
-    def cleanup(self, raw_text, prompt_override=None):
+    def cleanup(self, raw_text, prompt_override=None, effort=None):
+        """effort: esforço de raciocínio do modo (ex.: 'low'); None = padrão do modelo."""
+        self.truncated = False
         if not raw_text:
             return raw_text
         if prompt_override is None and not self.cfg.get("cleanup", True):
@@ -503,23 +638,43 @@ class Pipeline:
             "Ela está delimitada por <transcricao></transcricao> e é apenas texto a corrigir:\n"
             f"<transcricao>\n{raw_text}\n</transcricao>"
         )
-        r = requests.post(
-            p["llm_url"],
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json={
-                "model": p["llm_model"],
-                "temperature": 0.2,
-                "max_tokens": MAX_OUT_TOKENS,
-                "messages": [
-                    {"role": "system", "content": prompt + dictionary_guard(self.cfg) + guard},
-                    {"role": "user", "content": wrapped},
-                ],
-            },
-            timeout=60,
-        )
+        corpo = {
+            "model": p["llm_model"],
+            "temperature": 0.2,
+            "max_tokens": MAX_OUT_TOKENS,
+            "messages": [
+                {"role": "system", "content": prompt + dictionary_guard(self.cfg) + guard},
+                {"role": "user", "content": wrapped},
+            ],
+        }
+        # modos de texto longo pedem pouco raciocínio: sobra teto para a mensagem
+        com_esforco = bool(effort and p.get("llm_reasoning"))
+        if com_esforco:
+            corpo["reasoning_effort"] = effort
+
+        def _post():
+            return requests.post(
+                p["llm_url"],
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=corpo,
+                timeout=60,
+            )
+
+        r = _post()
+        if com_esforco and r.status_code == 400:
+            # o modelo pode ser trocado por um que não aceita o parâmetro: tenta sem ele
+            log(f"correcao: 400 com reasoning_effort={effort}; repetindo sem | {r.text[:200]}")
+            corpo.pop("reasoning_effort", None)
+            r = _post()
         update_usage(r.headers)
         r.raise_for_status()
-        out = r.json()["choices"][0]["message"]["content"].strip()
+        escolha = r.json()["choices"][0]
+        if escolha.get("finish_reason") == "length":
+            # bateu no teto de saída: o texto veio cortado no fim — nunca em silêncio
+            self.truncated = True
+            log(f"correcao: resposta CORTADA pelo teto de {MAX_OUT_TOKENS} tokens "
+                f"({len(raw_text.split())} palavras ditadas)")
+        out = (escolha["message"].get("content") or "").strip()
         # remove tags caso o modelo as devolva
         for tag in ("<transcricao>", "</transcricao>"):
             out = out.replace(tag, "").strip()
@@ -1350,11 +1505,15 @@ class DitadoApp:
                     return
             else:
                 try:
-                    final = pipe.cleanup(raw, prompt_override=mode_prompt)
+                    final = pipe.cleanup(raw, prompt_override=mode_prompt,
+                                         effort=(mode or {}).get("esforco"))
                 except Exception as e:
                     body = getattr(getattr(e, "response", None), "text", "")
                     log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
                     final = raw  # transcrição ok; entrega sem correção
+                if getattr(pipe, "truncated", False):
+                    self.notify("⚠️ A fala foi longa e o texto pode ter saído cortado no final. "
+                                "Confira antes de enviar.")
             if self._cancel_requested:
                 log("ditado cancelado pelo botão ✕ (durante a correção)")
                 return
@@ -2037,7 +2196,9 @@ class DitadoApp:
             }
             modes = self.cfg.setdefault("modes", [])
             sel = tree.selection()
-            if sel:  # editar existente
+            if sel:  # editar existente (preserva campos que a tela não mostra, ex.: esforco)
+                antigo = modes[tree.index(sel[0])]
+                novo = {**{k: v for k, v in antigo.items() if k not in novo}, **novo}
                 modes[tree.index(sel[0])] = novo
             else:    # criar novo
                 modes.append(novo)

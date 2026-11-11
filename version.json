@@ -1,4 +1,4 @@
 {
-  "version": "1.7.4",
-  "changelog": "Fim do falso alarme 'Escuta do teclado travou': o teste não roda quando a janela da frente é de administrador ou protegida, tecla real recente prova que a escuta está viva, e o app não reinicia em sequência."
+  "version": "1.7.5",
+  "changelog": "Cobrança de honorários: a mensagem agora traz tudo o que você falou, em texto completo e polido, mantendo os blocos de competência, vencimento, valor e total. O atalho do modo passa a ser Ctrl+Shift+H. Se uma fala muito longa sair cortada, o app avisa."
 }
