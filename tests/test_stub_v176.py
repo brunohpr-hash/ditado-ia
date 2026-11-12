@@ -1,4 +1,4 @@
-"""Teste de stub v1.7.5 — modo Cobrança de honorários: instrução nova, atalho, migração e teto."""
+"""Teste de stub v1.7.6 — modo Cobrança de honorários: instrução, atalho, migração, modelo e teto."""
 import copy, hashlib, importlib.util, json, os, sys, tempfile, types
 from pathlib import Path
 
@@ -17,8 +17,8 @@ APPDATA = Path(tempfile.mkdtemp()); os.environ["APPDATA"] = str(APPDATA)
 RAIZ = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("ditado", RAIZ / "main.py")
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-assert mod.APP_VERSION == "1.7.5", mod.APP_VERSION
-assert json.loads((RAIZ / "version.json").read_text(encoding="utf-8"))["version"] == "1.7.5"
+assert mod.APP_VERSION == "1.7.6", mod.APP_VERSION
+assert json.loads((RAIZ / "version.json").read_text(encoding="utf-8"))["version"] == "1.7.6"
 
 NOME = "Cobrança de honorários"
 # instrução de fábrica da v1.5.4–v1.7.4 (a que está salva nos PCs e na nuvem)
@@ -52,7 +52,8 @@ assert sha(mod.HONORARIOS_PROMPT) not in mod.HONORARIOS_PROMPTS_ANTIGOS
 
 # ---------- fábrica: instalação nova já nasce com atalho padrão, esforço baixo e instrução nova
 fab = [m for m in mod.DEFAULT_CONFIG["modes"] if m["nome"] == NOME][0]
-assert fab["hotkey"] == "ctrl+shift+h" and fab["esforco"] == "low" and fab["prompt"] == mod.HONORARIOS_PROMPT
+assert fab["hotkey"] == "ctrl+shift+h" and fab["prompt"] == mod.HONORARIOS_PROMPT
+assert fab["esforco"] == "none" and fab["modelo"] == "qwen/qwen3.8-27b"
 P = mod.HONORARIOS_PROMPT
 for trecho in ("📄 Competência:", "📅 Vencimento:", "💰 Valor:", "💵 Total:", "NÃO RESUMA", "a confirmar"):
     assert trecho in P, trecho
@@ -81,7 +82,8 @@ def carrega(cfg_salvo):
 # ---------- 1) caso do Bruno: instrução e atalho de fábrica antigos -> ambos atualizados e gravados
 cfg, h = carrega(salvo())
 assert len(h) == 1 and h[0]["prompt"] == mod.HONORARIOS_PROMPT and h[0]["hotkey"] == "ctrl+shift+h"
-assert h[0]["esforco"] == "low" and h[0]["ativo"] is True and h[0].get("atualizado_em") and cfg["_atualizado_em"]
+assert h[0]["esforco"] == "none" and h[0]["modelo"] == "qwen/qwen3.8-27b"
+assert h[0]["ativo"] is True and h[0].get("atualizado_em") and cfg["_atualizado_em"]
 disco = json.loads(mod.CONFIG_PATH.read_text(encoding="utf-8"))
 hd = [m for m in disco["modes"] if m["nome"] == NOME][0]
 assert hd["prompt"] == mod.HONORARIOS_PROMPT and hd["hotkey"] == "ctrl+shift+h", "migração não foi gravada"
@@ -97,7 +99,7 @@ assert mod.migrate_honorarios(cfg2) is False
 
 # ---------- 3) instrução editada pelo usuário: fica como está; o atalho de fábrica ainda migra
 cfg, h = carrega(salvo(prompt="minha instrução personalizada"))
-assert h[0]["prompt"] == "minha instrução personalizada" and "esforco" not in h[0]
+assert h[0]["prompt"] == "minha instrução personalizada" and "esforco" not in h[0] and "modelo" not in h[0]
 assert h[0]["hotkey"] == "ctrl+shift+h"
 
 # ---------- 4) atalho escolhido pelo usuário: fica como está; a instrução de fábrica ainda migra
@@ -127,7 +129,20 @@ assert hm["prompt"] == mod.HONORARIOS_PROMPT and hm["hotkey"] == "ctrl+shift+h",
 outro_pc = {"modes": copy.deepcopy(salvo()["modes"]), "_atualizado_em": "2026-11-10T09:00:00"}
 m2 = mod.merge_sync(outro_pc, m)
 hm2 = [x for x in m2["modes"] if x["nome"] == NOME][0]
-assert hm2["prompt"] == mod.HONORARIOS_PROMPT and hm2["hotkey"] == "ctrl+shift+h" and hm2["esforco"] == "low"
+assert hm2["prompt"] == mod.HONORARIOS_PROMPT and hm2["hotkey"] == "ctrl+shift+h"
+assert hm2["esforco"] == "none" and hm2["modelo"] == "qwen/qwen3.8-27b"
+
+# ---------- 7b) PC já na v1.7.5 (instrução nova, esforço low, sem modelo): ganha o modelo sem perder nada
+v175 = salvo(prompt=mod.HONORARIOS_PROMPT, hotkey="ctrl+shift+h", esforco="low", atualizado_em="2026-11-12T08:21:07")
+cfg, h = carrega(v175)
+assert h[0]["modelo"] == "qwen/qwen3.8-27b" and h[0]["esforco"] == "none" and h[0]["hotkey"] == "ctrl+shift+h"
+assert h[0]["prompt"] == mod.HONORARIOS_PROMPT and h[0]["atualizado_em"] > "2026-11-12T08:21:07"
+# e vence a cópia da v1.7.5 que está na nuvem (carimbo mais antigo)
+nuvem_175 = {"modes": copy.deepcopy(v175["modes"]), "modes_removed": [], "_atualizado_em": "2026-11-12T10:21:28"}
+m3 = mod.merge_sync(mod.sync_payload(cfg) | {"_atualizado_em": cfg["_atualizado_em"]}, nuvem_175)
+hm3 = [x for x in m3["modes"] if x["nome"] == NOME][0]
+assert hm3.get("modelo") == "qwen/qwen3.8-27b" and hm3["esforco"] == "none", "nuvem da 1.7.5 desfez o modelo"
+assert mod.migrate_honorarios(cfg) is False  # idempotente
 
 # ---------- 8) Pipeline.cleanup: esforço baixo só onde vale, sem cortar em silêncio
 class Resp:
@@ -164,6 +179,28 @@ p.cleanup("fala"); assert p.truncated is False  # o sinal não vaza para o ditad
 # teto gasto só com raciocínio (conteúdo vazio/None): entrega o bruto, nunca nada
 fila[:] = [Resp(200, {"choices": [{"finish_reason": "length", "message": {"content": None}}]})]
 assert p.cleanup("fala bruta", prompt_override="INSTR", effort="low") == "fala bruta" and p.truncated is True
+# ----- modelo próprio do modo
+QW = "qwen/qwen3.8-27b"
+assert p.cleanup("fala", prompt_override="INSTR", effort="none", model=QW) == "ok"
+assert calls[-1]["model"] == QW and calls[-1]["reasoning_effort"] == "none" and calls[-1]["max_tokens"] == mod.MAX_OUT_TOKENS
+# ditado comum e outros modos seguem no modelo padrão, sem o parâmetro
+p.cleanup("fala"); assert calls[-1]["model"] == "openai/gpt-oss-120b" and "reasoning_effort" not in calls[-1]
+# provedor OpenAI: ignora modelo/esforço do modo (o id não existe lá)
+po.cleanup("fala", prompt_override="INSTR", effort="none", model=QW)
+assert calls[-1]["model"] == "gpt-4o-mini" and "reasoning_effort" not in calls[-1]
+# modelo do modo aposentado (404), recusado (400) ou sem cota (429): cai no padrão com esforço low e entrega
+for cod in (404, 400, 429):
+    n = len(calls); fila[:] = [Resp(cod, text="model unavailable")]
+    assert p.cleanup("fala", prompt_override="INSTR", effort="none", model=QW) == "ok", cod
+    assert len(calls) == n + 2 and calls[n]["model"] == QW, cod
+    assert calls[n + 1]["model"] == "openai/gpt-oss-120b" and calls[n + 1]["reasoning_effort"] == "low", cod
+# ... e se o padrão também recusar o parâmetro, ainda tenta sem ele
+n = len(calls); fila[:] = [Resp(404), Resp(400, text="unknown parameter")]
+assert p.cleanup("fala", prompt_override="INSTR", effort="none", model=QW) == "ok"
+assert len(calls) == n + 3 and "reasoning_effort" not in calls[n + 2] and calls[n + 2]["model"] == "openai/gpt-oss-120b"
+# raciocínio vazado no texto é removido
+fila[:] = [Resp(200, {"choices": [{"finish_reason": "stop", "message": {"content": "<think>\nvou pensar\n</think>\n\nBom dia, Sr. João."}}]})]
+assert p.cleanup("fala", prompt_override="INSTR", effort="none", model=QW) == "Bom dia, Sr. João."
 # erro real da API continua subindo (o app entrega o texto bruto)
 fila[:] = [Resp(429, text="rate limit")]
 try:
@@ -171,4 +208,4 @@ try:
 except RuntimeError:
     pass
 
-print("OK — modo honorários v%s (instrução, atalho, migração, sync, teto)" % mod.APP_VERSION)
+print("OK — modo honorários v%s (instrução, atalho, migração, sync, modelo, teto)" % mod.APP_VERSION)

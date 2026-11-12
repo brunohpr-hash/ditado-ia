@@ -32,7 +32,7 @@ import sounddevice as sd
 from PIL import Image, ImageDraw
 
 APP_NAME = "Ditado IA"
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 MAX_OUT_TOKENS = 900  # Groq free: OTPM 1000/min; acima disso 429 "Request too large"
 UPDATE_REPO = "brunohpr-hash/ditado-ia"  # repositório oficial de atualizações
 UPDATE_RAW = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main"
@@ -51,8 +51,10 @@ SYNC_KEYS = ("dictionary", "dictionary_removed", "modes", "modes_removed", "lang
 # >>> honorarios (bloco gerado; não editar à mão)
 HONORARIOS_NOME = "Cobrança de honorários"
 HONORARIOS_HOTKEY = "ctrl+shift+h"  # padrão da suíte: Ctrl+Shift+letra
-# o modelo gasta o teto de saída "pensando"; este modo escreve mensagens longas
-HONORARIOS_ESFORCO = "low"
+# o modelo padrão "pensa" antes de responder e gasta o teto de saída nisso (texto cortado no
+# fim em fala longa); este modo usa um modelo que responde direto, sem raciocínio
+HONORARIOS_MODELO = "qwen/qwen3.8-27b"
+HONORARIOS_ESFORCO = "none"
 # instruções/atalhos de fábrica ANTIGOS (sha256 do texto com espaços normalizados):
 # config salvo que ainda tiver um destes é atualizado; o que o usuário editou, não.
 HONORARIOS_PROMPTS_ANTIGOS = {"e21f366dcde1599fd692d0cf2d130e337d7ae59788c2d99f44d23627b89eba00"}
@@ -211,6 +213,7 @@ DEFAULT_CONFIG = {
             "nome": HONORARIOS_NOME,
             "hotkey": HONORARIOS_HOTKEY,
             "ativo": True,
+            "modelo": HONORARIOS_MODELO,
             "esforco": HONORARIOS_ESFORCO,
             "prompt": HONORARIOS_PROMPT,
         },
@@ -306,9 +309,12 @@ def migrate_honorarios(cfg):
             m["prompt"] = HONORARIOS_PROMPT
             alterado = True
             log("modo honorários: instrução de fábrica atualizada (texto completo + blocos)")
-        if m.get("prompt") == HONORARIOS_PROMPT and m.get("esforco") != HONORARIOS_ESFORCO:
+        if m.get("prompt") == HONORARIOS_PROMPT and (
+                m.get("esforco") != HONORARIOS_ESFORCO or m.get("modelo") != HONORARIOS_MODELO):
             m["esforco"] = HONORARIOS_ESFORCO
+            m["modelo"] = HONORARIOS_MODELO
             alterado = True
+            log(f"modo honorários: modelo {HONORARIOS_MODELO} (sem raciocínio) configurado")
         if str(m.get("hotkey", "")).strip().lower() in HONORARIOS_HOTKEYS_ANTIGOS:
             if HONORARIOS_HOTKEY in em_uso:
                 log(f"modo honorários: atalho mantido ({m.get('hotkey')}) — "
@@ -613,8 +619,9 @@ class Pipeline:
         r.raise_for_status()
         return (r.json().get("text") or "").strip()
 
-    def cleanup(self, raw_text, prompt_override=None, effort=None):
-        """effort: esforço de raciocínio do modo (ex.: 'low'); None = padrão do modelo."""
+    def cleanup(self, raw_text, prompt_override=None, effort=None, model=None):
+        """effort: esforço de raciocínio do modo (ex.: 'low', 'none'); None = padrão do modelo.
+        model: modelo próprio do modo (só no provedor que declara llm_reasoning); None = padrão."""
         self.truncated = False
         if not raw_text:
             return raw_text
@@ -647,7 +654,10 @@ class Pipeline:
                 {"role": "user", "content": wrapped},
             ],
         }
-        # modos de texto longo pedem pouco raciocínio: sobra teto para a mensagem
+        # modos de texto longo: modelo que não gasta o teto de saída "pensando"
+        modelo_proprio = bool(model and p.get("llm_reasoning") and model != p["llm_model"])
+        if modelo_proprio:
+            corpo["model"] = model
         com_esforco = bool(effort and p.get("llm_reasoning"))
         if com_esforco:
             corpo["reasoning_effort"] = effort
@@ -661,6 +671,14 @@ class Pipeline:
             )
 
         r = _post()
+        if modelo_proprio and r.status_code in (400, 404, 429):
+            # modelo do modo aposentado, recusado ou sem cota: volta ao modelo padrão,
+            # com o menor raciocínio que ele aceita
+            log(f"correcao: {r.status_code} no modelo {model}; usando {p['llm_model']} | {r.text[:200]}")
+            corpo["model"] = p["llm_model"]
+            if com_esforco:
+                corpo["reasoning_effort"] = "low"
+            r = _post()
         if com_esforco and r.status_code == 400:
             # o modelo pode ser trocado por um que não aceita o parâmetro: tenta sem ele
             log(f"correcao: 400 com reasoning_effort={effort}; repetindo sem | {r.text[:200]}")
@@ -675,6 +693,8 @@ class Pipeline:
             log(f"correcao: resposta CORTADA pelo teto de {MAX_OUT_TOKENS} tokens "
                 f"({len(raw_text.split())} palavras ditadas)")
         out = (escolha["message"].get("content") or "").strip()
+        if "</think>" in out:  # raciocínio vazado no texto nunca vai para a mensagem
+            out = out.split("</think>")[-1].strip()
         # remove tags caso o modelo as devolva
         for tag in ("<transcricao>", "</transcricao>"):
             out = out.replace(tag, "").strip()
@@ -1506,7 +1526,8 @@ class DitadoApp:
             else:
                 try:
                     final = pipe.cleanup(raw, prompt_override=mode_prompt,
-                                         effort=(mode or {}).get("esforco"))
+                                         effort=(mode or {}).get("esforco"),
+                                         model=(mode or {}).get("modelo"))
                 except Exception as e:
                     body = getattr(getattr(e, "response", None), "text", "")
                     log(f"erro API (correcao, usando texto bruto): {e} | {body[:300]}")
@@ -1514,6 +1535,10 @@ class DitadoApp:
                 if getattr(pipe, "truncated", False):
                     self.notify("⚠️ A fala foi longa e o texto pode ter saído cortado no final. "
                                 "Confira antes de enviar.")
+                if mode:
+                    # medida para diagnóstico: quanto foi ditado x quanto foi entregue
+                    log(f"modo '{mode.get('nome')}': {len(raw.split())} palavras ditadas -> "
+                        f"{len((final or '').split())} entregues")
             if self._cancel_requested:
                 log("ditado cancelado pelo botão ✕ (durante a correção)")
                 return

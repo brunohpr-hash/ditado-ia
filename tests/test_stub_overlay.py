@@ -66,7 +66,7 @@ calls = []
 class P:
     def __init__(self, cfg): pass
     def transcribe(self, wav): calls.append("stt"); return "ola mundo"
-    def cleanup(self, raw, prompt_override=None, effort=None): calls.append("llm"); return "Olá, mundo"
+    def cleanup(self, raw, prompt_override=None, **k): calls.append("llm"); return "Olá, mundo"
 mod.Pipeline = P
 
 def new_app():

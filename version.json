@@ -1,4 +1,4 @@
 {
-  "version": "1.7.5",
-  "changelog": "Cobrança de honorários: a mensagem agora traz tudo o que você falou, em texto completo e polido, mantendo os blocos de competência, vencimento, valor e total. O atalho do modo passa a ser Ctrl+Shift+H. Se uma fala muito longa sair cortada, o app avisa."
+  "version": "1.7.6",
+  "changelog": "Cobrança de honorários: o modo passa a usar um modelo de IA que responde direto, sem gastar o limite de resposta 'pensando' — acaba o texto cortado ou encurtado no final em falas longas. O registro do app agora anota quantas palavras foram ditadas e quantas foram entregues."
 }
