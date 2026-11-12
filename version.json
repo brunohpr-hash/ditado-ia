@@ -1,4 +1,4 @@
 {
   "version": "1.7.6",
-  "changelog": "Cobrança de honorários: o modo passa a usar um modelo de IA que responde direto, sem gastar o limite de resposta 'pensando' — acaba o texto cortado ou encurtado no final em falas longas. O registro do app agora anota quantas palavras foram ditadas e quantas foram entregues."
+  "changelog": "Ditado com pausa longa no meio (parar para pensar ou consultar um valor) não perde mais o final da fala nem recebe frases que você não disse, como 'Obrigado por assistir': o app encurta os silêncios antes de transcrever. Cobrança de honorários passa a usar uma IA que escreve direto, sem cortar mensagens longas. O registro do app anota segundos gravados e palavras ditadas x entregues."
 }

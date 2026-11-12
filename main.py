@@ -564,6 +564,99 @@ def wav_bytes(frames, sample_rate):
     return buf
 
 
+def enxugar_silencio(audio, sample_rate, pausa_max=0.6, borda=0.25):
+    """Encurta pausas longas e o silêncio das pontas antes de transcrever.
+
+    O Whisper lê o áudio em janelas; uma pausa de vários segundos no meio da fala (pensar,
+    consultar um valor) faz ele ABANDONAR o que vem depois e, no lugar, inventar texto de
+    legenda ('Obrigado por assistir', 'Legenda por...'). Caso de campo 12/11/2026: o
+    fechamento das cobranças sumia. Com as pausas limitadas a `pausa_max` isso não acontece.
+
+    Conservador: se não der para separar fala de ruído com segurança, devolve o áudio intacto.
+    Nunca remove trecho com fala — só o miolo de silêncios maiores que `pausa_max`.
+    """
+    try:
+        n = len(audio)
+        quadro = max(1, int(sample_rate * 0.03))
+        nq = n // quadro
+        if nq < 40:  # menos de ~1,2 s: nada a ganhar
+            return audio
+        x = audio[: nq * quadro].astype(np.float32).reshape(nq, quadro)
+        rms = np.sqrt(np.mean(x * x, axis=1))
+        piso = float(np.percentile(rms, 10))
+        pico = float(np.percentile(rms, 95))
+        limiar = max(piso * 3.0, pico * 0.02, 40.0)
+        if pico < 150.0 or limiar > pico * 0.5:
+            return audio  # gravação fraca demais ou ruído colado na fala: não mexe
+        fala = rms > limiar
+        if fala.mean() < 0.05:
+            return audio
+        # protege as bordas de cada trecho falado (começo/fim de palavra são fracos)
+        b = max(1, int(round(borda / 0.03)))
+        idx = np.flatnonzero(fala)
+        manter = np.zeros(nq, dtype=bool)
+        for i in idx:
+            manter[max(0, i - b): i + b + 1] = True
+        # de cada silêncio maior que pausa_max sobra só pausa_max (metade de cada lado).
+        # Só é "silêncio" o trecho colado no piso de ruído: fala baixinha (mais fraca que o
+        # limiar, mas acima do chiado do microfone) fica inteira.
+        quieto = rms < max(piso * 1.6, 40.0)
+        max_q = max(2, int(round(pausa_max / 0.03)))
+        i = 0
+        while i < nq:
+            if manter[i]:
+                i += 1
+                continue
+            j = i
+            while j < nq and not manter[j]:
+                j += 1
+            tam = j - i
+            if quieto[i:j].mean() < 0.9:  # tem som ali no meio: não corta
+                manter[i:j] = True
+                i = j
+                continue
+            nas_pontas = i == 0 or j == nq
+            sobra = 0 if nas_pontas else max_q
+            if tam > sobra:
+                meio = sobra // 2
+                manter[i: i + meio] = True
+                manter[j - (sobra - meio): j] = True
+            else:
+                manter[i:j] = True
+            i = j
+        if manter.all():
+            return audio
+        partes = audio[: nq * quadro].reshape(nq, quadro)[manter].reshape(-1)
+        if (n - len(partes)) < sample_rate * 0.5:
+            return audio  # ganho irrisório: entrega o original
+        return partes
+    except Exception as e:
+        log(f"enxugar_silencio falhou (usando áudio original): {e}")
+        return audio
+
+
+# Frases que o Whisper inventa quando o áudio termina em silêncio/ruído (vêm das legendas de
+# vídeo com que ele foi treinado). Ninguém dita isso: removidas só quando são a ÚLTIMA frase
+# do texto (logo após um ponto final ou sozinhas). Nomes exigem iniciais maiúsculas, para
+# não comer uma frase real como "Legenda de cores da planilha".
+_NOME = r"[A-ZÀ-Ý][a-zà-ÿ]+"
+_FANTASMAS_FIM = re.compile(
+    r"(?:^|(?<=[.!?…\n]))"
+    r"(?:\s*(?:[Oo]brigad[oa] por assistir"
+    r"|[Ll]egendas? pela comunidade(?: d[aeo])?(?: [Aa]mara\.org)?"
+    rf"|[Ll]egendas? (?:por|de) {_NOME}(?: {_NOME}){{1,2}}"
+    r"|[Ll]egenda Adriana Zanotto)[.!…]*)+\s*$"
+)
+
+
+def limpar_fantasmas(texto):
+    """Remove do fim da transcrição as frases-fantasma do Whisper. Devolve (texto, removido)."""
+    m = _FANTASMAS_FIM.search(texto or "")
+    if not m:
+        return texto, ""
+    return texto[: m.start()].rstrip(), m.group(0).strip()
+
+
 def beep(freq=880, dur=120):
     try:
         import winsound
@@ -1493,10 +1586,17 @@ class DitadoApp:
             if self.overlay and self.cfg.get("show_overlay", True):
                 self.overlay.set_processing(
                     "Aplicando ao texto selecionado…" if selecao else "Transcrevendo e corrigindo…")
-            wav = wav_bytes(audio, self.cfg["sample_rate"])
+            sr = self.cfg["sample_rate"]
+            enxuto = enxugar_silencio(audio, sr)  # `audio` original segue intacto p/ pendentes
+            # medida para diagnóstico: fala gravada x enviada (pausas longas confundem a transcrição)
+            log(f"ditado: {len(audio) / sr:.1f}s gravados, {len(enxuto) / sr:.1f}s enviados à transcrição")
+            wav = wav_bytes(enxuto, sr)
             pipe = Pipeline(self.cfg)
             try:
                 raw = pipe.transcribe(wav)
+                raw, fantasma = limpar_fantasmas(raw)
+                if fantasma:
+                    log(f"transcrição: frase-fantasma removida do fim ({fantasma!r})")
             except Exception as e:
                 body = getattr(getattr(e, "response", None), "text", "")
                 log(f"erro API (transcricao): {e} | {body[:300]}\n{traceback.format_exc()}")
